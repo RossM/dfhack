@@ -45,7 +45,7 @@ keybinding add Ctrl-Shift-P command-prompt
 keybinding add Alt-M@dwarfmode/Default "dwarfmonitor prefs"
 keybinding add Ctrl-F@dwarfmode/Default "dwarfmonitor stats"
 
-# export a Dwarf's preferences screen in BBCode to post ot a forum
+# export a Dwarf's preferences screen in BBCode to post to a forum
 keybinding add Ctrl-Shift-F@dwarfmode forum-dwarves
 
 ##############################
@@ -72,6 +72,7 @@ keybinding add Ctrl-Shift-Z@dwarfmode/Default "stocks show"
 
 # open an overview window summarising some stocks (dfstatus)
 keybinding add Ctrl-Shift-I@dwarfmode/Default "gui/dfstatus"
+keybinding add Ctrl-Shift-I@dfhack/lua/dfstatus "gui/dfstatus"
 
 # q->stockpile - copy & paste stockpiles
 keybinding add Alt-P copystock
@@ -180,6 +181,8 @@ tweak import-priority-category
 # Misc. UI tweaks
 tweak civ-view-agreement
 tweak fps-min
+tweak kitchen-keys
+tweak kitchen-prefs-empty
 tweak max-wheelbarrow
 tweak shift-8-scroll
 tweak tradereq-pet-gender
@@ -187,6 +190,9 @@ tweak tradereq-pet-gender
 ###########################
 # Globally acting plugins #
 ###########################
+
+# Display DFHack version on title screen
+enable title-version
 
 # Dwarf Manipulator (simple in-game Dwarf Therapist replacement)
 enable manipulator
@@ -198,8 +204,8 @@ enable search
 enable automaterial
 
 # Other interface improvement tools
-# enable dwarfmonitor mousequery automelt autotrade buildingplan resume trackstop zone stocks autochop stockpiles
 enable \
+ confirm \
  dwarfmonitor \
  mousequery \
  automelt \
@@ -217,7 +223,10 @@ enable \
 # You can comment out the extension of a line.
 
 # allow the fortress bookkeeper to queue jobs through the manager
-stockflow enable
+enable stockflow
+
+# enable mouse controls and sand indicator in embark screen
+embark-tools enable sand mouse
 
 ###########
 # Scripts #
@@ -228,6 +237,14 @@ soundsense-season
 
 # write identifying information about the fort to gamelog on world load
 log-region
+
+# add information to item viewscreens
+view-item-info enable
+
+gui/load-screen enable
+
+#roses-init must be called on world load if you are using his persist-delay, class system, etc
+#base/roses-init -all
 
 #######################################################
 # Apply binary patches at runtime                     #

@@ -1,4 +1,24 @@
 -- Interface powered item editor.
+
+--[[=begin
+
+gui/gm-editor
+=============
+This editor allows to change and modify almost anything in df. Press :kbd:`?` for
+in-game help. There are three ways to open this editor:
+
+* Callling ``gui/gm-editor``  from a command or keybinding opens the editor
+  on whatever is selected or viewed (e.g. unit/item description screen)
+
+* using gui/gm-editor <lua command> - executes lua command and opens editor on
+  its results (e.g. ``gui/gm-editor "df.global.world.items.all"`` shows all items)
+
+* using gui/gm-editor dialog - shows an in game dialog to input lua command. Works
+  the same as version above.
+
+.. image:: /docs/images/gm-editor.png
+
+=end]]
 local gui = require 'gui'
 local dialog = require 'gui.dialogs'
 local widgets =require 'gui.widgets'
@@ -14,7 +34,8 @@ local keybindings={
     reinterpret={key="CUSTOM_ALT_R",desc="Open selected entry as something else"},
     start_filter={key="CUSTOM_S",desc="Start typing filter, Enter to finish"},
     help={key="HELP",desc="Show this help"},
-    NOT_USED={key="SEC_SELECT",desc="Choose an enum value from a list"}, --not a binding...
+    displace={key="STRING_A093",desc="Open reference offseted by index"},
+    NOT_USED={key="SEC_SELECT",desc="Edit selected entry as a number (for enums)"}, --not a binding...
 }
 function getTargetFromScreens()
     local my_trg
@@ -71,7 +92,7 @@ function GmEditorUi:init(args)
     self.keys={}
     local helptext={{text="Help"},NEWLINE,NEWLINE}
     for k,v in pairs(keybindings) do
-        table.insert(helptext,{text=v.desc,key=v.key,key_sep=':'})
+        table.insert(helptext,{text=v.desc,key=v.key,key_sep=': '})
         table.insert(helptext,NEWLINE)
     end
     table.insert(helptext,NEWLINE)
@@ -80,13 +101,14 @@ function GmEditorUi:init(args)
     local helpPage=widgets.Panel{
         subviews={widgets.Label{text=helptext,frame = {l=1,t=1,yalign=0}}}}
     local mainList=widgets.List{view_id="list_main",choices={},frame = {l=1,t=3,yalign=0},on_submit=self:callback("editSelected"),
-        on_submit2=self:callback("editSelectedEnum"),
+        on_submit2=self:callback("editSelectedRaw"),
         text_pen=dfhack.pen.parse{fg=COLOR_DARKGRAY,bg=0},cursor_pen=dfhack.pen.parse{fg=COLOR_YELLOW,bg=0}}
     local mainPage=widgets.Panel{
         subviews={
             mainList,
-            widgets.Label{text={{text="<no item>",id="name"},{gap=1,text="Help",key="HELP",key_sep = '()'}}, view_id = 'lbl_current_item',frame = {l=1,t=1,yalign=0}},
-            widgets.EditField{frame={l=1,t=2},active=false,on_change=self:callback('text_input'),on_submit=self:callback("enable_input",false),view_id="filter_input"},
+            widgets.Label{text={{text="<no item>",id="name"},{gap=1,text="Help",key=keybindings.help.key,key_sep = '()'}}, view_id = 'lbl_current_item',frame = {l=1,t=1,yalign=0}},
+            widgets.Label{text={{text="Search",key=keybindings.start_filter.key,key_sep = '()'},{text=": "}},frame={l=1,t=2}},
+            widgets.EditField{frame={l=12,t=2},active=false,on_change=self:callback('text_input'),on_submit=self:callback("enable_input",false),view_id="filter_input"},
             --widgets.Label{text="BLAH2"}
                 }
         ,view_id='page_main'}
@@ -168,19 +190,35 @@ end
 function GmEditorUi:currentTarget()
     return self.stack[#self.stack]
 end
-function GmEditorUi:editSelectedEnum(index,choice)
+function GmEditorUi:getSelectedEnumType()
     local trg=self:currentTarget()
-    local trg_key=trg.keys[index]
-    if trg.target._field==nil then qerror("not an enum") end
+    local trg_key=trg.keys[self.subviews.list_main:getSelected()]
+        
+    local ok,ret=pcall(function () --super safe way to check if the field has enum
+        return trg.target._field==nil or trg.target:_field(trg_key)==nil
+    end)
+    if not ok or ret==true then
+        return nil
+    end
+    
     local enum=trg.target:_field(trg_key)._type
-
     if enum._kind=="enum-type" then
+        return enum
+    else
+        return nil
+    end
+end
+function GmEditorUi:editSelectedEnum(index,choice)
+    local enum=self:getSelectedEnumType()
+    if enum then
+        local trg=self:currentTarget()
+        local trg_key=self:getSelectedKey()
         local list={}
         for i=enum._first_item, enum._last_item do
-            table.insert(list,{text=tostring(enum[i]),value=i})
+            table.insert(list,{text=('%s (%i)'):format(tostring(enum[i]), i),value=i})
         end
         guiScript.start(function()
-            local ret,idx,choice=guiScript.showListPrompt("Choose item:",nil,3,list)
+            local ret,idx,choice=guiScript.showListPrompt("Choose item:",nil,3,list,nil,true)
             if ret then
                 trg.target[trg_key]=choice.value
                 self:updateTarget(true)
@@ -199,7 +237,20 @@ function GmEditorUi:openReinterpret(key)
                     self:pushTarget(df.reinterpret_cast(ntype,trg.target[key]))
                 end)
 end
-function GmEditorUi:editSelected(index,choice)
+function GmEditorUi:openOffseted(index,choice)
+    local trg=self:currentTarget()
+    local trg_key=trg.keys[index]
+
+    dialog.showInputPrompt(tostring(trg_key),"Enter offset:",COLOR_WHITE,"",
+        function(choice)
+            self:pushTarget(trg.target[trg_key]:_displace(tonumber(choice)))
+        end)
+end
+function GmEditorUi:editSelectedRaw(index,choice)
+    self:editSelected(index, choice, {raw=true})
+end
+function GmEditorUi:editSelected(index,choice,opts)
+    opts = opts or {}
     local trg=self:currentTarget()
     local trg_key=trg.keys[index]
     if trg.target and trg.target._kind and trg.target._kind=="bitfield" then
@@ -208,18 +259,22 @@ function GmEditorUi:editSelected(index,choice)
     else
         --print(type(trg.target[trg.keys[trg.selected]]),trg.target[trg.keys[trg.selected]]._kind or "")
         local trg_type=type(trg.target[trg_key])
-        if trg_type=='number' or trg_type=='string' then --ugly TODO: add metatable get selected
+        if self:getSelectedEnumType() and not opts.raw then
+            self:editSelectedEnum()
+        elseif trg_type=='number' or trg_type=='string' then --ugly TODO: add metatable get selected
             dialog.showInputPrompt(tostring(trg_key),"Enter new value:",COLOR_WHITE,
                 tostring(trg.target[trg_key]),self:callback("commitEdit",trg_key))
 
-        elseif trg_type=='boolean' then
-            trg.target[trg_key]= not trg.target[trg_key]
+        elseif trg_type == 'boolean' then
+            trg.target[trg_key] = not trg.target[trg_key]
             self:updateTarget(true)
-        elseif trg_type=='userdata' then
+        elseif trg_type == 'userdata' or trg_type == 'table' then
             self:pushTarget(trg.target[trg_key])
+        elseif trg_type == 'nil' or trg_type == 'function' then
+            -- ignore
         else
-            print("Unknow type:"..trg_type)
-            print("Subtype:"..tostring(trg.target[trg_key]._kind))
+            print("Unknown type:"..trg_type)
+            pcall(function() print("Subtype:"..tostring(trg.target[trg_key]._kind)) end)
         end
     end
 end
@@ -272,7 +327,8 @@ function GmEditorUi:onInput(keys)
         local _,stoff=df.sizeof(trg.target)
         local size,off=df.sizeof(trg.target:_field(self:getSelectedKey()))
         dialog.showMessage("Offset",string.format("Size hex=%x,%x dec=%d,%d\nRelative hex=%x dec=%d",size,off,size,off,off-stoff,off-stoff),COLOR_WHITE)
-
+    elseif keys[keybindings.displace.key] then
+        self:openOffseted(self.subviews.list_main:getSelected())
     elseif keys[keybindings.find.key] then
         self:find()
     elseif keys[keybindings.lua_set.key] then
@@ -298,7 +354,7 @@ function getStringValue(trg,field)
     if obj._field ~= nil then
         local enum=obj:_field(field)._type
         if enum._kind=="enum-type" then
-            text=text.."("..tostring(enum[obj[field]])..")"
+            text=text.." ("..tostring(enum[obj[field]])..")"
         end
     end
     end)
@@ -367,21 +423,50 @@ function GmEditorUi:popTarget()
     self:updateTarget()
 end
 function show_editor(trg)
+    if not trg then
+        qerror('Target not found')
+    end
     local screen = GmEditorUi{target=trg}
     screen:show()
+end
+eval_env = {}
+setmetatable(eval_env, {__index = function(_, k)
+    if k == 'scr' or k == 'screen' then
+        return dfhack.gui.getCurViewscreen()
+    elseif k == 'bld' or k == 'building' then
+        return dfhack.gui.getSelectedBuilding()
+    elseif k == 'item' then
+        return dfhack.gui.getSelectedItem()
+    elseif k == 'job' then
+        return dfhack.gui.getSelectedJob()
+    elseif k == 'wsjob' or k == 'workshop_job' then
+        return dfhack.gui.getSelectedWorkshopJob()
+    elseif k == 'unit' then
+        return dfhack.gui.getSelectedUnit()
+    else
+        for g in pairs(df.global) do
+            if g == k then
+                return df.global[k]
+            end
+        end
+        return _G[k]
+    end
+end})
+function eval(s)
+    local f, err = load("return " .. s, "expression", "t", eval_env)
+    if err then qerror(err) end
+    return f()
 end
 if #args~=0 then
     if args[1]=="dialog" then
         function thunk(entry)
-            local t=load("return "..entry)()
-            show_editor(t)
+            show_editor(eval(entry))
         end
         dialog.showInputPrompt("Gm Editor", "Object to edit:", COLOR_GRAY, "",thunk)
     elseif args[1]=="free" then
         show_editor(df.reinterpret_cast(df[args[2]],args[3]))
     else
-        local t=load("return "..args[1])()
-        show_editor(t)
+        show_editor(eval(args[1]))
     end
 else
     show_editor(getTargetFromScreens())

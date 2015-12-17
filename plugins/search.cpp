@@ -5,6 +5,9 @@
 
 #include <VTableInterpose.h>
 
+#include "uicommon.h"
+
+#include "df/ui_look_list.h"
 #include "df/viewscreen_announcelistst.h"
 #include "df/viewscreen_petst.h"
 #include "df/viewscreen_storesst.h"
@@ -12,10 +15,12 @@
 #include "df/viewscreen_layer_militaryst.h"
 #include "df/viewscreen_layer_noblelistst.h"
 #include "df/viewscreen_layer_workshop_profilest.h"
+#include "df/viewscreen_topicmeeting_fill_land_holder_positionsst.h"
 #include "df/viewscreen_tradegoodsst.h"
 #include "df/viewscreen_unitlistst.h"
 #include "df/viewscreen_buildinglistst.h"
 #include "df/viewscreen_joblistst.h"
+#include "df/historical_figure.h"
 #include "df/interface_key.h"
 #include "df/interfacest.h"
 #include "df/layer_object_listst.h"
@@ -46,6 +51,8 @@ REQUIRE_GLOBAL(ui);
 REQUIRE_GLOBAL(ui_building_assign_units);
 REQUIRE_GLOBAL(ui_building_in_assign);
 REQUIRE_GLOBAL(ui_building_item_cursor);
+REQUIRE_GLOBAL(ui_look_cursor);
+REQUIRE_GLOBAL(ui_look_list);
 
 /*
 Search Plugin
@@ -59,12 +66,6 @@ with each keystroke creates a new filtered vector off the saves for the screen
 to use.
 */
 
-
-void OutputString(int8_t color, int &x, int y, const std::string &text)
-{
-    Screen::paintString(Screen::Pen(' ', color, 0), x, y, text);
-    x += text.length();
-}
 
 void make_text_dim(int x1, int x2, int y)
 {
@@ -97,6 +98,8 @@ static bool is_live_screen(const df::viewscreen *screen)
 
 static string get_unit_description(df::unit *unit)
 {
+    if (!unit)
+        return "";
     string desc;
     auto name = Units::getVisibleName(unit);
     if (name->has_name)
@@ -106,6 +109,36 @@ static string get_unit_description(df::unit *unit)
     return desc;
 }
 
+static bool cursor_key_pressed (std::set<df::interface_key> *input)
+{
+    // give text input (e.g. "2") priority over cursor keys
+    for (auto it = input->begin(); it != input->end(); ++it)
+    {
+        if (Screen::keyToChar(*it) != -1)
+            return false;
+    }
+    return
+    input->count(df::interface_key::CURSOR_UP) ||
+    input->count(df::interface_key::CURSOR_DOWN) ||
+    input->count(df::interface_key::CURSOR_LEFT) ||
+    input->count(df::interface_key::CURSOR_RIGHT) ||
+    input->count(df::interface_key::CURSOR_UPLEFT) ||
+    input->count(df::interface_key::CURSOR_UPRIGHT) ||
+    input->count(df::interface_key::CURSOR_DOWNLEFT) ||
+    input->count(df::interface_key::CURSOR_DOWNRIGHT) ||
+    input->count(df::interface_key::CURSOR_UP_FAST) ||
+    input->count(df::interface_key::CURSOR_DOWN_FAST) ||
+    input->count(df::interface_key::CURSOR_LEFT_FAST) ||
+    input->count(df::interface_key::CURSOR_RIGHT_FAST) ||
+    input->count(df::interface_key::CURSOR_UPLEFT_FAST) ||
+    input->count(df::interface_key::CURSOR_UPRIGHT_FAST) ||
+    input->count(df::interface_key::CURSOR_DOWNLEFT_FAST) ||
+    input->count(df::interface_key::CURSOR_DOWNRIGHT_FAST) ||
+    input->count(df::interface_key::CURSOR_UP_Z) ||
+    input->count(df::interface_key::CURSOR_DOWN_Z) ||
+    input->count(df::interface_key::CURSOR_UP_Z_AUX) ||
+    input->count(df::interface_key::CURSOR_DOWN_Z_AUX);
+}
 
 //
 // START: Generic Search functionality
@@ -188,11 +221,7 @@ public:
         {
             // Query typing mode
 
-            if (input->empty())
-            {
-                return false;
-            }
-            df::interface_key last_token = *input->rbegin();
+            df::interface_key last_token = get_string_key(input);
             int charcode = Screen::keyToChar(last_token);
             if (charcode >= 32 && charcode <= 126)
             {
@@ -214,8 +243,7 @@ public:
                 // ENTER or ESC: leave typing mode
                 end_entry_mode();
             }
-            else if  (input->count(interface_key::CURSOR_UP) || input->count(interface_key::CURSOR_DOWN)
-                || input->count(interface_key::CURSOR_LEFT) || input->count(interface_key::CURSOR_RIGHT))
+            else if (cursor_key_pressed(input))
             {
                 // Arrow key pressed. Leave entry mode and allow screen to process key
                 end_entry_mode();
@@ -249,6 +277,11 @@ public:
 
     static search_generic<S, T> *lock;
 
+    bool in_entry_mode()
+    {
+        return entry_mode;
+    }
+
 protected:
     virtual string get_element_description(T element) const = 0;
     virtual void render() const = 0;
@@ -268,11 +301,6 @@ protected:
     virtual void do_post_init()
     {
 
-    }
-
-    bool in_entry_mode()
-    {
-        return entry_mode;
     }
 
     void start_entry_mode()
@@ -693,6 +721,13 @@ struct generic_search_hook : T
         if (ok)
             module.render();
     }
+
+    DEFINE_VMETHOD_INTERPOSE(bool, key_conflict, (df::interface_key key))
+    {
+        if (module.in_entry_mode() && (key == interface_key::MOVIES || key == interface_key::HELP))
+            return true;
+        return INTERPOSE_NEXT(key_conflict)(key);
+    }
 };
 
 template <class T, class V, int D> V generic_search_hook<T, V, D> ::module;
@@ -702,17 +737,20 @@ template <class T, class V, int D> V generic_search_hook<T, V, D> ::module;
 #define IMPLEMENT_HOOKS_WITH_ID(screen, module, id, prio) \
     typedef generic_search_hook<screen, module, id> module##_hook; \
     template<> IMPLEMENT_VMETHOD_INTERPOSE_PRIO(module##_hook, feed, prio); \
-    template<> IMPLEMENT_VMETHOD_INTERPOSE_PRIO(module##_hook, render, prio)
+    template<> IMPLEMENT_VMETHOD_INTERPOSE_PRIO(module##_hook, render, prio); \
+    template<> IMPLEMENT_VMETHOD_INTERPOSE_PRIO(module##_hook, key_conflict, prio)
 
 #define IMPLEMENT_HOOKS(screen, module) \
     typedef generic_search_hook<screen, module> module##_hook; \
     template<> IMPLEMENT_VMETHOD_INTERPOSE(module##_hook, feed); \
-    template<> IMPLEMENT_VMETHOD_INTERPOSE(module##_hook, render)
+    template<> IMPLEMENT_VMETHOD_INTERPOSE(module##_hook, render); \
+    template<> IMPLEMENT_VMETHOD_INTERPOSE(module##_hook, key_conflict)
 
 #define IMPLEMENT_HOOKS_PRIO(screen, module, prio) \
     typedef generic_search_hook<screen, module> module##_hook; \
     template<> IMPLEMENT_VMETHOD_INTERPOSE_PRIO(module##_hook, feed, prio); \
-    template<> IMPLEMENT_VMETHOD_INTERPOSE_PRIO(module##_hook, render, prio)
+    template<> IMPLEMENT_VMETHOD_INTERPOSE_PRIO(module##_hook, render, prio); \
+    template<> IMPLEMENT_VMETHOD_INTERPOSE_PRIO(module##_hook, key_conflict, prio)
 
 //
 // END: Generic Search functionality
@@ -916,6 +954,8 @@ private:
 private:
     string get_element_description(df::item *element) const
     {
+        if (!element)
+            return "";
         return Items::getDescription(element, 0, true);
     }
 
@@ -951,6 +991,8 @@ private:
 
     static string get_non_work_description(df::unit *unit)
     {
+        if (!unit)
+            return "";
         for (auto p = unit->status.misc_traits.begin(); p < unit->status.misc_traits.end(); p++)
         {
             if ((*p)->id == misc_trait_type::Migrant || (*p)->id == misc_trait_type::OnBreak)
@@ -975,6 +1017,8 @@ private:
 
     string get_element_description(df::unit *unit) const
     {
+        if (!unit)
+            return "Inactive";
         string desc = get_unit_description(unit);
         if (!unit->job.current_job)
         {
@@ -1026,8 +1070,8 @@ private:
 };
 
 typedef generic_search_hook<df::viewscreen_unitlistst, unitlist_search> unitlist_search_hook;
-template<> IMPLEMENT_VMETHOD_INTERPOSE_PRIO(unitlist_search_hook, feed, 100);
-template<> IMPLEMENT_VMETHOD_INTERPOSE_PRIO(unitlist_search_hook, render, 100);
+IMPLEMENT_HOOKS_PRIO(df::viewscreen_unitlistst, unitlist_search, 100);
+
 //
 // END: Unit screen search
 //
@@ -1042,6 +1086,8 @@ class trade_search_base : public search_twocolumn_modifiable<df::viewscreen_trad
 private:
     string get_element_description(df::item *element) const
     {
+        if (!element)
+            return "";
         return Items::getDescription(element, 0, true);
     }
 
@@ -1216,7 +1262,17 @@ public:
         return &viewscreen->item_status;
     }
 
+    bool should_check_input(set<df::interface_key> *input)
+    {
+        if (input->count(interface_key::STOCKPILE_SETTINGS_DISABLE) && !in_entry_mode() && !search_string.empty())
+        {
+            // Restore original list
+            clear_search();
+            reset_all();
+        }
 
+        return true;
+    }
 
 };
 
@@ -1271,12 +1327,15 @@ public:
         {
             // About to make an assignment, so restore original list (it will be changed by the game)
             int32_t *cursor = get_viewscreen_cursor();
-            df::unit *selected_unit = get_primary_list()->at(*cursor);
+            auto list = get_primary_list();
+            if (*cursor >= list->size())
+                return false;
+            df::unit *selected_unit = list->at(*cursor);
             clear_search();
 
-            for (*cursor = 0; *cursor < get_primary_list()->size(); (*cursor)++)
+            for (*cursor = 0; *cursor < list->size(); (*cursor)++)
             {
-                if (get_primary_list()->at(*cursor) == selected_unit)
+                if (list->at(*cursor) == selected_unit)
                     break;
             }
 
@@ -1317,6 +1376,8 @@ private:
 
     string get_element_description(df::building *bld) const
     {
+        if (!bld)
+            return "";
         bool is_ownable_room = (bld->is_room && room_quality_names.find(bld->getType()) != room_quality_names.end());
 
         string desc;
@@ -1405,6 +1466,8 @@ private:
 private:
     string get_element_description(df::report *element) const
     {
+        if (!element)
+            return "";
         return element->text;
     }
 };
@@ -1606,6 +1669,113 @@ IMPLEMENT_HOOKS(df::viewscreen_joblistst, joblist_search);
 
 
 //
+// START: Look menu search
+//
+
+typedef search_generic<df::viewscreen_dwarfmodest, df::ui_look_list::T_items*> look_menu_search_base;
+class look_menu_search : public look_menu_search_base
+{
+    typedef df::ui_look_list::T_items::T_type elt_type;
+public:
+    bool can_init(df::viewscreen_dwarfmodest *screen)
+    {
+        if (ui->main.mode == df::ui_sidebar_mode::LookAround)
+        {
+            return look_menu_search_base::can_init(screen);
+        }
+
+        return false;
+    }
+
+    string get_element_description(df::ui_look_list::T_items *element) const
+    {
+        std::string desc = "";
+        switch (element->type)
+        {
+        case elt_type::Item:
+            if (element->item)
+                desc = Items::getDescription(element->item, 0, true);
+            break;
+        case elt_type::Unit:
+            if (element->unit)
+                desc = get_unit_description(element->unit);
+            break;
+        case elt_type::Building:
+            if (element->building)
+                element->building->getName(&desc);
+            break;
+        default:
+            break;
+        }
+        return desc;
+    }
+
+    bool force_in_search (size_t i)
+    {
+        df::ui_look_list::T_items *element = saved_list1[i];
+        switch (element->type)
+        {
+        case elt_type::Item:
+        case elt_type::Unit:
+        case elt_type::Building:
+            return false;
+            break;
+        default:
+            return true;
+            break;
+        }
+    }
+
+    void render() const
+    {
+        auto dims = Gui::getDwarfmodeViewDims();
+        int left_margin = dims.menu_x1 + 1;
+        int x = left_margin;
+        int y = 1;
+
+        print_search_option(x, y);
+    }
+
+    vector<df::ui_look_list::T_items*> *get_primary_list()
+    {
+        return &ui_look_list->items;
+    }
+
+    virtual int32_t * get_viewscreen_cursor()
+    {
+        return ui_look_cursor;
+    }
+
+
+    bool should_check_input(set<df::interface_key> *input)
+    {
+        if (input->count(interface_key::SECONDSCROLL_UP)
+            || input->count(interface_key::SECONDSCROLL_DOWN)
+            || input->count(interface_key::SECONDSCROLL_PAGEUP)
+            || input->count(interface_key::SECONDSCROLL_PAGEDOWN))
+        {
+            end_entry_mode();
+            return false;
+        }
+        if (cursor_key_pressed(input))
+        {
+            end_entry_mode();
+            clear_search();
+            return false;
+        }
+
+        return true;
+    }
+};
+
+IMPLEMENT_HOOKS(df::viewscreen_dwarfmodest, look_menu_search);
+
+//
+// END: Look menu search
+//
+
+
+//
 // START: Burrow assignment search
 //
 
@@ -1736,6 +1906,48 @@ IMPLEMENT_HOOKS(df::viewscreen_dwarfmodest, room_assign_search);
 // END: Room assignment search
 //
 
+//
+// START: Noble suggestion search
+//
+
+typedef search_generic<df::viewscreen_topicmeeting_fill_land_holder_positionsst, int32_t> noble_suggest_search_base;
+class noble_suggest_search : public noble_suggest_search_base
+{
+public:
+    string get_element_description (int32_t hf_id) const
+    {
+        df::historical_figure *histfig = df::historical_figure::find(hf_id);
+        if (!histfig)
+            return "";
+        df::unit *unit = df::unit::find(histfig->unit_id);
+        if (!unit)
+            return "";
+        return get_unit_description(unit);
+    }
+
+    void render() const
+    {
+        print_search_option(2, gps->dimy - 4);
+    }
+
+    vector<int32_t> *get_primary_list()
+    {
+        return &viewscreen->candidate_histfig_ids;
+    }
+
+    virtual int32_t *get_viewscreen_cursor()
+    {
+        return &viewscreen->cursor;
+    }
+
+};
+
+IMPLEMENT_HOOKS(df::viewscreen_topicmeeting_fill_land_holder_positionsst, noble_suggest_search);
+
+//
+// END: Noble suggestion search
+//
+
 #define SEARCH_HOOKS \
     HOOK_ACTION(unitlist_search_hook) \
     HOOK_ACTION(roomlist_search_hook) \
@@ -1748,9 +1960,11 @@ IMPLEMENT_HOOKS(df::viewscreen_dwarfmodest, room_assign_search);
     HOOK_ACTION(profiles_search_hook) \
     HOOK_ACTION(announcement_search_hook) \
     HOOK_ACTION(joblist_search_hook) \
+    HOOK_ACTION(look_menu_search_hook) \
     HOOK_ACTION(burrow_search_hook) \
     HOOK_ACTION(stockpile_search_hook) \
-    HOOK_ACTION(room_assign_search_hook)
+    HOOK_ACTION(room_assign_search_hook) \
+    HOOK_ACTION(noble_suggest_search_hook)
 
 DFhackCExport command_result plugin_enable ( color_ostream &out, bool enable)
 {
@@ -1761,7 +1975,8 @@ DFhackCExport command_result plugin_enable ( color_ostream &out, bool enable)
     {
 #define HOOK_ACTION(hook) \
     !INTERPOSE_HOOK(hook, feed).apply(enable) || \
-    !INTERPOSE_HOOK(hook, render).apply(enable) ||
+    !INTERPOSE_HOOK(hook, render).apply(enable) || \
+    !INTERPOSE_HOOK(hook, key_conflict).apply(enable) ||
 
         if (SEARCH_HOOKS 0)
             return CR_FAILURE;
@@ -1795,7 +2010,8 @@ DFhackCExport command_result plugin_shutdown ( color_ostream &out )
 {
 #define HOOK_ACTION(hook) \
     INTERPOSE_HOOK(hook, feed).remove(); \
-    INTERPOSE_HOOK(hook, render).remove();
+    INTERPOSE_HOOK(hook, render).remove(); \
+    INTERPOSE_HOOK(hook, key_conflict).remove();
 
     SEARCH_HOOKS
 

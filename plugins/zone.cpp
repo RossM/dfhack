@@ -41,6 +41,7 @@ using namespace std;
 #include "Export.h"
 #include "PluginManager.h"
 #include "MiscUtils.h"
+#include "uicommon.h"
 
 #include "LuaTools.h"
 #include "DataFuncs.h"
@@ -148,7 +149,7 @@ const string zone_help_filters =
     "  caged        - in a built cage\n"
     "  own          - from own civilization\n"
     "  war          - trained war creature\n"
-    "  tamed        - tamed\n"
+    "  tame         - tamed\n"
     "  named        - has name or nickname\n"
     "                 can be used to mark named units for slaughter\n"
     "  merchant     - is a merchant / belongs to a merchant\n"
@@ -601,12 +602,12 @@ void unitInfo(color_ostream & out, df::unit* unit, bool verbose = false)
 
 bool isCage(df::building * building)
 {
-    return building->getType() == building_type::Cage;
+    return building && (building->getType() == building_type::Cage);
 }
 
 bool isChain(df::building * building)
 {
-    return building->getType() == building_type::Chain;
+    return building && (building->getType() == building_type::Chain);
 }
 
 // returns building of cage at cursor position (NULL if nothing found)
@@ -2004,7 +2005,7 @@ command_result df_zone (color_ostream &out, vector <string> & parameters)
         // cagezone wants a pen/pit as starting point
         if(!cagezone_assign)
             target_building = findCageAtCursor();
-        if(!target_building)
+        if(target_building)
         {
             out << "Target building type: cage." << endl;
         }
@@ -3705,12 +3706,6 @@ DFHACK_PLUGIN_LUA_COMMANDS {
 
 //START zone filters
 
-void OutputString(int8_t color, int &x, int y, const std::string &text)
-{
-    Screen::paintString(Screen::Pen(' ', color, 0), x, y, text);
-    x += text.length();
-}
-
 class zone_filter
 {
 public:
@@ -3856,7 +3851,7 @@ public:
                 return false;
             }
 
-            df::interface_key last_token = *input->rbegin();
+            df::interface_key last_token = get_string_key(input);
             int charcode = Screen::keyToChar(last_token);
             if (charcode >= 32 && charcode <= 126)
             {

@@ -34,10 +34,13 @@
 #include "df/crime.h"
 #include "df/unit_inventory_item.h"
 #include "df/viewscreen_dwarfmodest.h"
+#include "df/viewscreen_kitchenprefst.h"
 #include "df/viewscreen_layer_unit_actionst.h"
 #include "df/squad_order_trainst.h"
 #include "df/ui_build_selector.h"
+#include "df/ui_sidebar_menus.h"
 #include "df/building_trapst.h"
+#include "df/building_workshopst.h"
 #include "df/item_actual.h"
 #include "df/item_crafted.h"
 #include "df/item_armorst.h"
@@ -78,11 +81,15 @@
 #include "tweaks/civ-agreement-ui.h"
 #include "tweaks/craft-age-wear.h"
 #include "tweaks/eggs-fertile.h"
+#include "tweaks/embark-profile-name.h"
 #include "tweaks/farm-plot-select.h"
 #include "tweaks/fast-heat.h"
 #include "tweaks/fast-trade.h"
 #include "tweaks/fps-min.h"
 #include "tweaks/import-priority-category.h"
+#include "tweaks/kitchen-keys.h"
+#include "tweaks/kitchen-prefs-color.h"
+#include "tweaks/kitchen-prefs-empty.h"
 #include "tweaks/manager-quantity.h"
 #include "tweaks/max-wheelbarrow.h"
 #include "tweaks/military-assign.h"
@@ -101,11 +108,14 @@ using namespace df::enums;
 DFHACK_PLUGIN("tweak");
 DFHACK_PLUGIN_IS_ENABLED(is_enabled);
 
+REQUIRE_GLOBAL(enabler);
 REQUIRE_GLOBAL(ui);
+REQUIRE_GLOBAL(ui_area_map_width);
 REQUIRE_GLOBAL(ui_build_selector);
 REQUIRE_GLOBAL(ui_building_item_cursor);
 REQUIRE_GLOBAL(ui_menu_width);
-REQUIRE_GLOBAL(ui_area_map_width);
+REQUIRE_GLOBAL(ui_sidebar_menus);
+REQUIRE_GLOBAL(ui_workshop_in_add);
 REQUIRE_GLOBAL(world);
 
 using namespace DFHack::Gui;
@@ -130,6 +140,7 @@ static std::multimap<std::string, tweak_onupdate_hookst> tweak_onupdate_hooks;
 
 DFhackCExport command_result plugin_init (color_ostream &out, std::vector <PluginCommand> &commands)
 {
+    is_enabled = true; // Allow plugin_onupdate to work (subcommands are enabled individually)
     commands.push_back(PluginCommand(
         "tweak", "Various tweaks for minor bugs.", tweak, false,
         "  tweak clear-missing\n"
@@ -167,6 +178,8 @@ DFhackCExport command_result plugin_init (color_ostream &out, std::vector <Plugi
         "    Fixes overlapping text on the \"view agreement\" screen\n"
         "  tweak craft-age-wear [disable]\n"
         "    Makes cloth and leather items wear out at the correct rate (bug 6003).\n"
+        "  tweak embark-profile-name [disable]\n"
+        "    Allows the use of lowercase letters when saving embark profiles\n"
         "  tweak eggs-fertile [disable]\n"
         "    Displays a fertile/infertile indicator on nestboxes\n"
         "  tweak farm-plot-select [disable]\n"
@@ -183,6 +196,12 @@ DFhackCExport command_result plugin_init (color_ostream &out, std::vector <Plugi
         "  tweak import-priority-category [disable]\n"
         "    When meeting with a liaison, makes Shift+Left/Right arrow adjust\n"
         "    the priority of an entire category of imports.\n"
+        "  tweak kitchen-keys [disable]\n"
+        "    Fixes DF kitchen meal keybindings (bug 614)\n"
+        "  tweak kitchen-prefs-color [disable]\n"
+        "    Changes color of enabled items to green in kitchen preferences\n"
+        "  tweak kitchen-prefs-empty [disable]\n"
+        "    Fixes a layout issue with empty kitchen tabs (bug 9000)\n"
         "  tweak manager-quantity [disable]\n"
         "    Removes the limit of 30 jobs per manager order\n"
         "  tweak max-wheelbarrow [disable]\n"
@@ -219,6 +238,8 @@ DFhackCExport command_result plugin_init (color_ostream &out, std::vector <Plugi
 
     TWEAK_HOOK("eggs-fertile", egg_fertile_hook, render);
 
+    TWEAK_HOOK("embark-profile-name", embark_profile_name_hook, feed);
+
     TWEAK_HOOK("farm-plot-select", farm_select_hook, feed);
     TWEAK_HOOK("farm-plot-select", farm_select_hook, render);
 
@@ -233,6 +254,13 @@ DFhackCExport command_result plugin_init (color_ostream &out, std::vector <Plugi
 
     TWEAK_HOOK("import-priority-category", takerequest_hook, feed);
     TWEAK_HOOK("import-priority-category", takerequest_hook, render);
+
+    TWEAK_HOOK("kitchen-keys", kitchen_keys_hook, feed);
+    TWEAK_HOOK("kitchen-keys", kitchen_keys_hook, render);
+
+    TWEAK_HOOK("kitchen-prefs-color", kitchen_prefs_color_hook, render);
+
+    TWEAK_HOOK("kitchen-prefs-empty", kitchen_prefs_empty_hook, render);
 
     TWEAK_HOOK("manager-quantity", manager_quantity_hook, feed);
 
@@ -665,12 +693,16 @@ static void enable_hook(color_ostream &out, VMethodInterposeLinkBase &hook, vect
     if (vector_get(parameters, 1) == "disable")
     {
         hook.remove();
-        out.print("Disabled tweak %s (%s)\n", parameters[0].c_str(), hook.name());
+        fprintf(stderr, "Disabled tweak %s (%s)\n", parameters[0].c_str(), hook.name());
+        fflush(stderr);
     }
     else
     {
         if (hook.apply())
-            out.print("Enabled tweak %s (%s)\n", parameters[0].c_str(), hook.name());
+        {
+            fprintf(stderr, "Enabled tweak %s (%s)\n", parameters[0].c_str(), hook.name());
+            fflush(stderr);
+        }
         else
             out.printerr("Could not activate tweak %s (%s)\n", parameters[0].c_str(), hook.name());
     }
@@ -694,9 +726,10 @@ static command_result enable_tweak(string tweak, color_ostream &out, vector <str
         {
             bool state = (vector_get(parameters, 1) != "disable");
             recognized = true;
-            tweak_onupdate_hookst hook = it->second;
+            tweak_onupdate_hookst &hook = it->second;
             hook.enabled = state;
-            out.print("%s tweak %s (%s)\n", state ? "Enabled" : "Disabled", cmd.c_str(), hook.name.c_str());
+            fprintf(stderr, "%s tweak %s (%s)\n", state ? "Enabled" : "Disabled", cmd.c_str(), hook.name.c_str());
+            fflush(stderr);
         }
     }
     if (!recognized)

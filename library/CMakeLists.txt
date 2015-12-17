@@ -1,6 +1,11 @@
 PROJECT (dfapi)
 cmake_minimum_required(VERSION 2.8)
 
+# prevent CMake warnings about INTERFACE_LINK_LIBRARIES vs LINK_INTERFACE_LIBRARIES
+IF(CMAKE_VERSION VERSION_GREATER "2.8.12")
+    CMAKE_POLICY(SET CMP0022 OLD)
+ENDIF()
+
 ## build options
 OPTION(BUILD_DEVEL "Install/package files required for development (For SDK)." OFF)
 OPTION(BUILD_DOXYGEN "Create/install/package doxygen documentation for DFHack (For SDK)." OFF)
@@ -114,6 +119,7 @@ include/modules/Units.h
 include/modules/Engravings.h
 include/modules/EventManager.h
 include/modules/Gui.h
+include/modules/GuiHooks.h
 include/modules/Items.h
 include/modules/Job.h
 include/modules/kitchen.h
@@ -122,6 +128,7 @@ include/modules/MapCache.h
 include/modules/Materials.h
 include/modules/Notes.h
 include/modules/Random.h
+include/modules/Renderer.h
 include/modules/Screen.h
 include/modules/Translation.h
 include/modules/Vermin.h
@@ -147,6 +154,7 @@ modules/Maps.cpp
 modules/Materials.cpp
 modules/Notes.cpp
 modules/Random.cpp
+modules/Renderer.cpp
 modules/Screen.cpp
 modules/Translation.cpp
 modules/Vermin.cpp
@@ -240,18 +248,30 @@ IF(UNIX)
     ENDIF()
 ENDIF()
 
-IF(UNIX)
+IF(APPLE)
+  SET(PROJECT_LIBS dl dfhack-md5 dfhack-tinyxml dfhack-tinythread)
+ELSEIF(UNIX)
   SET(PROJECT_LIBS rt dl dfhack-md5 dfhack-tinyxml dfhack-tinythread)
-  IF(APPLE)
-      SET(PROJECT_LIBS dl dfhack-md5 dfhack-tinyxml dfhack-tinythread)
- ENDIF()
 ELSE(WIN32)
   #FIXME: do we really need psapi?
-  SET(PROJECT_LIBS psapi dfhack-tinyxml dfhack-tinythread)
+  SET(PROJECT_LIBS psapi dfhack-md5 dfhack-tinyxml dfhack-tinythread)
 ENDIF()
 
 ADD_LIBRARY(dfhack-version STATIC DFHackVersion.cpp)
-SET_TARGET_PROPERTIES(dfhack-version PROPERTIES COMPILE_DEFINITIONS DFHACK_VERSION="${DFHACK_VERSION}")
+SET_PROPERTY(TARGET dfhack-version APPEND PROPERTY COMPILE_DEFINITIONS
+    DFHACK_VERSION="${DFHACK_VERSION}"
+    DF_VERSION="${DF_VERSION}"
+    DFHACK_RELEASE="${DFHACK_RELEASE}"
+)
+
+ADD_CUSTOM_TARGET(git-describe
+    COMMAND ${CMAKE_COMMAND}
+        -D dfhack_SOURCE_DIR:STRING=${dfhack_SOURCE_DIR}
+        -D GIT_EXECUTABLE:STRING=${GIT_EXECUTABLE}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/git-describe.cmake
+    COMMENT "Obtaining git commit information"
+)
+ADD_DEPENDENCIES(dfhack-version git-describe)
 
 ADD_LIBRARY(dfhack SHARED ${PROJECT_SOURCES})
 ADD_DEPENDENCIES(dfhack generate_headers)
@@ -285,6 +305,9 @@ SET_TARGET_PROPERTIES(dfhack  PROPERTIES DEBUG_POSTFIX "-debug" )
 
 IF(APPLE)
     SET(SDL_LIBRARY ${CMAKE_INSTALL_PREFIX}/libs/SDL.framework)
+    IF(NOT EXISTS ${SDL_LIBRARY})
+        MESSAGE(SEND_ERROR "SDL framework not found. Make sure CMAKE_INSTALL_PREFIX is specified and correct.")
+    ENDIF()
     SET(CXX_LIBRARY ${CMAKE_INSTALL_PREFIX}/libs/libstdc++.6.dylib)
     SET(ZIP_LIBRARY /usr/lib/libz.dylib)
     TARGET_LINK_LIBRARIES(dfhack ${SDL_LIBRARY})
@@ -294,7 +317,7 @@ IF(APPLE)
     SET_TARGET_PROPERTIES(dfhack PROPERTIES SOVERSION 1.0.0)
 ENDIF()
 
-TARGET_LINK_LIBRARIES(dfhack protobuf-lite clsocket lua dfhack-version ${PROJECT_LIBS})
+TARGET_LINK_LIBRARIES(dfhack protobuf-lite clsocket lua jsoncpp dfhack-version ${PROJECT_LIBS})
 SET_TARGET_PROPERTIES(dfhack PROPERTIES LINK_INTERFACE_LIBRARIES "")
 
 TARGET_LINK_LIBRARIES(dfhack-client protobuf-lite clsocket)
@@ -357,11 +380,12 @@ install(DIRECTORY lua/
         DESTINATION ${DFHACK_LUA_DESTINATION}
         FILES_MATCHING PATTERN "*.lua")
 
-install(DIRECTORY ${dfhack_SOURCE_DIR}/scripts
-        DESTINATION ${DFHACK_DATA_DESTINATION}
-        FILES_MATCHING PATTERN "*.lua"
-                       PATTERN "*.rb"
-        )
+#install(DIRECTORY ${dfhack_SOURCE_DIR}/scripts
+#        DESTINATION ${DFHACK_DATA_DESTINATION}
+#        FILES_MATCHING PATTERN "*.lua"
+#                       PATTERN "*.rb"
+#                       PATTERN "3rdparty" EXCLUDE
+#        )
 
 install(DIRECTORY ${dfhack_SOURCE_DIR}/patches
         DESTINATION ${DFHACK_DATA_DESTINATION}

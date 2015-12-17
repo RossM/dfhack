@@ -32,6 +32,7 @@ distribution.
 using namespace std;
 
 #include "modules/Screen.h"
+#include "modules/GuiHooks.h"
 #include "MemAccess.h"
 #include "VersionInfo.h"
 #include "Types.h"
@@ -65,6 +66,7 @@ using df::global::gview;
 using df::global::enabler;
 
 using Screen::Pen;
+using Screen::PenArray;
 
 using std::string;
 
@@ -92,8 +94,9 @@ bool Screen::inGraphicsMode()
     return init && init->display.flag.is_set(init_display_flags::USE_GRAPHICS);
 }
 
-static void doSetTile(const Pen &pen, int index)
+static void doSetTile_default(const Pen &pen, int x, int y, bool map)
 {
+    int index = ((x * gps->dimy) + y);
     auto screen = gps->screen + index*4;
     screen[0] = uint8_t(pen.ch);
     screen[1] = uint8_t(pen.fg) & 15;
@@ -106,6 +109,12 @@ static void doSetTile(const Pen &pen, int index)
     gps->screentexpos_cbr[index] = pen.tile_bg;
 }
 
+GUI_HOOK_DEFINE(Screen::Hooks::set_tile, doSetTile_default);
+static void doSetTile(const Pen &pen, int x, int y, bool map)
+{
+    GUI_HOOK_TOP(Screen::Hooks::set_tile)(pen, x, y, map);
+}
+
 bool Screen::paintTile(const Pen &pen, int x, int y)
 {
     if (!gps || !pen.valid()) return false;
@@ -113,7 +122,7 @@ bool Screen::paintTile(const Pen &pen, int x, int y)
     auto dim = getWindowSize();
     if (x < 0 || x >= dim.x || y < 0 || y >= dim.y) return false;
 
-    doSetTile(pen, x*dim.y + y);
+    doSetTile(pen, x, y, false);
     return true;
 }
 
@@ -187,10 +196,8 @@ bool Screen::fillRect(const Pen &pen, int x1, int y1, int x2, int y2)
 
     for (int x = x1; x <= x2; x++)
     {
-        int index = x*dim.y;
-
         for (int y = y1; y <= y2; y++)
-            doSetTile(pen, index+y);
+            doSetTile(pen, x, y, false);
     }
 
     return true;
@@ -207,13 +214,13 @@ bool Screen::drawBorder(const std::string &title)
 
     for (int x = 0; x < dim.x; x++)
     {
-        doSetTile(border, x * dim.y + 0);
-        doSetTile(border, x * dim.y + dim.y - 1);
+        doSetTile(border, x, 0, false);
+        doSetTile(border, x, dim.y - 1, false);
     }
     for (int y = 0; y < dim.y; y++)
     {
-        doSetTile(border, 0 * dim.y + y);
-        doSetTile(border, (dim.x - 1) * dim.y + y);
+        doSetTile(border, 0, y, false);
+        doSetTile(border, dim.x - 1, y, false);
     }
 
     paintString(signature, dim.x-8, dim.y-1, "DFHack");
@@ -437,6 +444,73 @@ df::interface_key Screen::charToKey(char code)
 }
 
 /*
+ * Pen array
+ */
+
+PenArray::PenArray(unsigned int bufwidth, unsigned int bufheight)
+    :dimx(bufwidth), dimy(bufheight), static_alloc(false)
+{
+    buffer = new Pen[bufwidth * bufheight];
+    clear();
+}
+
+PenArray::PenArray(unsigned int bufwidth, unsigned int bufheight, void *buf)
+    :dimx(bufwidth), dimy(bufheight), static_alloc(true)
+{
+    buffer = (Pen*)((PenArray*)buf + 1);
+    clear();
+}
+
+PenArray::~PenArray()
+{
+    if (!static_alloc)
+        delete[] buffer;
+}
+
+void PenArray::clear()
+{
+    for (unsigned int x = 0; x < dimx; x++)
+    {
+        for (unsigned int y = 0; y < dimy; y++)
+        {
+            set_tile(x, y, Screen::Pen(0, 0, 0, 0, false));
+        }
+    }
+}
+
+Pen PenArray::get_tile(unsigned int x, unsigned int y)
+{
+    if (x < dimx && y < dimy)
+        return buffer[(y * dimx) + x];
+    return Pen(0, 0, 0, 0, false);
+}
+
+void PenArray::set_tile(unsigned int x, unsigned int y, Screen::Pen pen)
+{
+    if (x < dimx && y < dimy)
+        buffer[(y * dimx) + x] = pen;
+}
+
+void PenArray::draw(unsigned int x, unsigned int y, unsigned int width, unsigned int height,
+                    unsigned int bufx, unsigned int bufy)
+{
+    if (!gps)
+        return;
+    for (unsigned int gridx = x; gridx < x + width; gridx++)
+    {
+        for (unsigned int gridy = y; gridy < y + height; gridy++)
+        {
+            if (gridx >= gps->dimx ||
+                gridy >= gps->dimy ||
+                gridx - x + bufx >= dimx ||
+                gridy - y + bufy >= dimy)
+                continue;
+            Screen::paintTile(buffer[((gridy - y + bufy) * dimx) + (gridx - x + bufx)], gridx, gridy);
+        }
+    }
+}
+
+/*
  * Base DFHack viewscreen.
  */
 
@@ -590,6 +664,9 @@ void dfhack_lua_viewscreen::update_focus(lua_State *L, int idx)
 {
     lua_getfield(L, idx, "text_input_mode");
     text_input_mode = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    lua_getfield(L, idx, "allow_options");
+    allow_options = lua_toboolean(L, -1);
     lua_pop(L, 1);
 
     lua_getfield(L, idx, "focus_path");
@@ -754,6 +831,13 @@ void dfhack_lua_viewscreen::logic()
 
     lua_pushstring(Lua::Core::State, "onIdle");
     safe_call_lua(do_notify, 1, 0);
+}
+
+bool dfhack_lua_viewscreen::key_conflict(df::interface_key key)
+{
+    if (key == df::interface_key::OPTIONS)
+        return !allow_options;
+    return dfhack_viewscreen::key_conflict(key);
 }
 
 void dfhack_lua_viewscreen::help()

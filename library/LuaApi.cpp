@@ -38,6 +38,8 @@ distribution.
 #include "DataDefs.h"
 #include "DataIdentity.h"
 #include "DataFuncs.h"
+#include "DFHackVersion.h"
+#include "PluginManager.h"
 
 #include "modules/World.h"
 #include "modules/Gui.h"
@@ -1041,6 +1043,116 @@ static void OpenPen(lua_State *state)
     lua_pop(state, 1);
 }
 
+/******************
+* PenArray object *
+******************/
+
+static int DFHACK_PENARRAY_TOKEN = 0;
+using Screen::PenArray;
+
+static PenArray *check_penarray_native(lua_State *L, int index)
+{
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &DFHACK_PENARRAY_TOKEN);
+
+    if (!lua_getmetatable(L, index) || !lua_rawequal(L, -1, -2))
+        luaL_argerror(L, index, "not a penarray object");
+
+    lua_pop(L, 2);
+
+    return (PenArray*)lua_touserdata(L, index);
+}
+
+static int dfhack_penarray_new(lua_State *L)
+{
+    int bufwidth = luaL_checkint(L, 1);
+    int bufheight = luaL_checkint(L, 2);
+    void *buf = lua_newuserdata(L, sizeof(PenArray) + (sizeof(Pen) * bufwidth * bufheight));
+    new (buf) PenArray(bufwidth, bufheight, buf);
+
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &DFHACK_PENARRAY_TOKEN);
+    lua_setmetatable(L, -2);
+
+    return 1;
+}
+
+static int dfhack_penarray_clear(lua_State *L)
+{
+    PenArray *parr = check_penarray_native(L, 1);
+    parr->clear();
+    return 0;
+}
+
+static int dfhack_penarray_get_dims(lua_State *L)
+{
+    PenArray *parr = check_penarray_native(L, 1);
+    lua_pushinteger(L, parr->get_dimx());
+    lua_pushinteger(L, parr->get_dimy());
+    return 2;
+}
+
+static int dfhack_penarray_get_tile(lua_State *L)
+{
+    PenArray *parr = check_penarray_native(L, 1);
+    unsigned int x = luaL_checkint(L, 2);
+    unsigned int y = luaL_checkint(L, 3);
+    if (x < parr->get_dimx() && y < parr->get_dimy())
+    {
+        Pen pen = parr->get_tile(x, y);
+        Lua::Push(L, pen);
+    }
+    else
+    {
+        lua_pushnil(L);
+    }
+    return 1;
+}
+
+static int dfhack_penarray_set_tile(lua_State *L)
+{
+    PenArray *parr = check_penarray_native(L, 1);
+    unsigned int x = luaL_checkint(L, 2);
+    unsigned int y = luaL_checkint(L, 3);
+    Pen pen;
+    Lua::CheckPen(L, &pen, 4);
+    parr->set_tile(x, y, pen);
+    return 0;
+}
+
+static int dfhack_penarray_draw(lua_State *L)
+{
+    PenArray *parr = check_penarray_native(L, 1);
+    unsigned int x = (unsigned int)luaL_checkint(L, 2);
+    unsigned int y = (unsigned int)luaL_checkint(L, 3);
+    unsigned int w = (unsigned int)luaL_checkint(L, 4);
+    unsigned int h = (unsigned int)luaL_checkint(L, 5);
+    unsigned int bufx = (unsigned int)luaL_optint(L, 6, 0);
+    unsigned int bufy = (unsigned int)luaL_optint(L, 7, 0);
+    parr->draw(x, y, w, h, bufx, bufy);
+    return 0;
+}
+
+static const luaL_Reg dfhack_penarray_funcs[] = {
+    { "new", dfhack_penarray_new },
+    { "clear", dfhack_penarray_clear },
+    { "get_dims", dfhack_penarray_get_dims },
+    { "get_tile", dfhack_penarray_get_tile },
+    { "set_tile", dfhack_penarray_set_tile },
+    { "draw", dfhack_penarray_draw },
+    { NULL, NULL }
+};
+
+static void OpenPenArray(lua_State *state)
+{
+    luaL_getsubtable(state, lua_gettop(state), "penarray");
+
+    lua_dup(state);
+    lua_rawsetp(state, LUA_REGISTRYINDEX, &DFHACK_PENARRAY_TOKEN);
+
+    luaL_setfuncs(state, dfhack_penarray_funcs, 0);
+
+    lua_pop(state, 1);
+}
+
 /********************
  * Random generator *
  ********************/
@@ -1286,6 +1398,8 @@ static std::string df2utf(std::string s) { return DF2UTF(s); }
 static std::string utf2df(std::string s) { return UTF2DF(s); }
 static std::string df2console(std::string s) { return DF2CONSOLE(s); }
 
+#define WRAP_VERSION_FUNC(name, function) WRAPN(name, DFHack::Version::function)
+
 static const LuaWrapper::FunctionReg dfhack_module[] = {
     WRAP(getOSType),
     WRAP(getDFVersion),
@@ -1298,6 +1412,12 @@ static const LuaWrapper::FunctionReg dfhack_module[] = {
     WRAP(df2utf),
     WRAP(utf2df),
     WRAP(df2console),
+    WRAP_VERSION_FUNC(getDFHackVersion, dfhack_version),
+    WRAP_VERSION_FUNC(getDFHackRelease, dfhack_release),
+    WRAP_VERSION_FUNC(getCompiledDFVersion, df_version),
+    WRAP_VERSION_FUNC(getGitDescription, git_description),
+    WRAP_VERSION_FUNC(getGitCommit, git_commit),
+    WRAP_VERSION_FUNC(isRelease, is_release),
     { NULL, NULL }
 };
 
@@ -1344,6 +1464,7 @@ static const LuaWrapper::FunctionReg dfhack_job_module[] = {
     WRAPM(Job,isSuitableMaterial),
     WRAPM(Job,getName),
     WRAPM(Job,linkIntoWorld),
+    WRAPM(Job,removePostings),
     WRAPN(is_equal, jobEqual),
     WRAPN(is_item_equal, jobItemEqual),
     { NULL, NULL }
@@ -1399,6 +1520,7 @@ static const LuaWrapper::FunctionReg dfhack_units_module[] = {
     WRAPM(Units, getNominalSkill),
     WRAPM(Units, getEffectiveSkill),
     WRAPM(Units, getExperience),
+    WRAPM(Units, isValidLabor),
     WRAPM(Units, computeMovementSpeed),
     WRAPM(Units, computeSlowdownFactor),
     WRAPM(Units, getProfessionName),
@@ -1660,10 +1782,29 @@ static const LuaWrapper::FunctionReg dfhack_world_module[] = {
     WRAPM(World, ReadCurrentWeather),
     WRAPM(World, SetCurrentWeather),
     WRAPM(World, ReadWorldFolder),
-    WRAPM(World, isFortressMode),
-    WRAPM(World, isAdventureMode),
-    WRAPM(World, isArena),
-    WRAPM(World, isLegends),
+    { NULL, NULL }
+};
+
+#define WORLD_GAMEMODE_WRAPPER(func) \
+    static int world_gamemode_##func(lua_State *L) \
+    { \
+        int gametype = luaL_optint(L, 1, -1); \
+        lua_pushboolean(L, World::func((df::game_type)gametype)); \
+        return 1;\
+    }
+#define WORLD_GAMEMODE_FUNC(func) \
+    {#func, world_gamemode_##func}
+
+WORLD_GAMEMODE_WRAPPER(isFortressMode);
+WORLD_GAMEMODE_WRAPPER(isAdventureMode);
+WORLD_GAMEMODE_WRAPPER(isArena);
+WORLD_GAMEMODE_WRAPPER(isLegends);
+
+static const luaL_Reg dfhack_world_funcs[] = {
+    WORLD_GAMEMODE_FUNC(isFortressMode),
+    WORLD_GAMEMODE_FUNC(isAdventureMode),
+    WORLD_GAMEMODE_FUNC(isArena),
+    WORLD_GAMEMODE_FUNC(isLegends),
     { NULL, NULL }
 };
 
@@ -2072,7 +2213,14 @@ static int filesystem_listdir(lua_State *L)
     luaL_checktype(L,1,LUA_TSTRING);
     std::string dir=lua_tostring(L,1);
     std::vector<std::string> files;
-    DFHack::Filesystem::listdir(dir, files);
+    int err = DFHack::Filesystem::listdir(dir, files);
+    if (err)
+    {
+        lua_pushnil(L);
+        lua_pushstring(L, strerror(err));
+        lua_pushinteger(L, err);
+        return 3;
+    }
     lua_newtable(L);
     for(int i=0;i<files.size();i++)
     {
@@ -2095,8 +2243,12 @@ static int filesystem_listdir_recursive(lua_State *L)
     if (err)
     {
         lua_pushnil(L);
+        if (err == -1)
+            lua_pushfstring(L, "max depth exceeded: %d", depth);
+        else
+            lua_pushstring(L, strerror(err));
         lua_pushinteger(L, err);
-        return 2;
+        return 3;
     }
     lua_newtable(L);
     int i = 1;
@@ -2488,6 +2640,47 @@ static int internal_getModifiers(lua_State *L)
     return 1;
 }
 
+static int internal_addScriptPath(lua_State *L)
+{
+    const char *path = luaL_checkstring(L, 1);
+    bool search_before = (lua_gettop(L) > 1 && lua_toboolean(L, 2));
+    lua_pushboolean(L, Core::getInstance().addScriptPath(path, search_before));
+    return 1;
+}
+
+static int internal_removeScriptPath(lua_State *L)
+{
+    const char *path = luaL_checkstring(L, 1);
+    lua_pushboolean(L, Core::getInstance().removeScriptPath(path));
+    return 1;
+}
+
+static int internal_getScriptPaths(lua_State *L)
+{
+    int i = 1;
+    lua_newtable(L);
+    std::vector<std::string> paths;
+    Core::getInstance().getScriptPaths(&paths);
+    for (auto it = paths.begin(); it != paths.end(); ++it)
+    {
+        lua_pushinteger(L, i++);
+        lua_pushstring(L, it->c_str());
+        lua_settable(L, -3);
+    }
+    return 1;
+}
+
+static int internal_findScript(lua_State *L)
+{
+    const char *name = luaL_checkstring(L, 1);
+    std::string path = Core::getInstance().findScript(name);
+    if (path.size())
+        lua_pushstring(L, path.c_str());
+    else
+        lua_pushnil(L);
+    return 1;
+}
+
 static const luaL_Reg dfhack_internal_funcs[] = {
     { "getAddress", internal_getAddress },
     { "setAddress", internal_setAddress },
@@ -2503,6 +2696,10 @@ static const luaL_Reg dfhack_internal_funcs[] = {
     { "getDir", filesystem_listdir },
     { "runCommand", internal_runCommand },
     { "getModifiers", internal_getModifiers },
+    { "addScriptPath", internal_addScriptPath },
+    { "removeScriptPath", internal_removeScriptPath },
+    { "getScriptPaths", internal_getScriptPaths },
+    { "findScript", internal_findScript },
     { NULL, NULL }
 };
 
@@ -2516,6 +2713,7 @@ void OpenDFHackApi(lua_State *state)
     OpenPersistent(state);
     OpenMatinfo(state);
     OpenPen(state);
+    OpenPenArray(state);
     OpenRandom(state);
 
     LuaWrapper::SetFunctionWrappers(state, dfhack_module);
@@ -2524,7 +2722,7 @@ void OpenDFHackApi(lua_State *state)
     OpenModule(state, "units", dfhack_units_module, dfhack_units_funcs);
     OpenModule(state, "items", dfhack_items_module, dfhack_items_funcs);
     OpenModule(state, "maps", dfhack_maps_module, dfhack_maps_funcs);
-    OpenModule(state, "world", dfhack_world_module);
+    OpenModule(state, "world", dfhack_world_module, dfhack_world_funcs);
     OpenModule(state, "burrows", dfhack_burrows_module, dfhack_burrows_funcs);
     OpenModule(state, "buildings", dfhack_buildings_module, dfhack_buildings_funcs);
     OpenModule(state, "constructions", dfhack_constructions_module);

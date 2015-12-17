@@ -60,7 +60,7 @@ public:
     {
         show_fps=gps->display_frames;
         gps->display_frames=0;
-        cursor_pos = 0;
+        cursor_pos = entry.size();
         frame = 0;
         history_idx = command_history.size();
         if (history_idx > 0)
@@ -327,6 +327,13 @@ DFhackCExport command_result plugin_init ( color_ostream &out, std::vector <Plug
         "command-prompt","Shows a command prompt on window.",show_prompt,hotkey_allow_all,
         "command-prompt [entry] - shows a cmd prompt in df window. Entry is used for default prefix (e.g. ':lua')"
         ));
+    return CR_OK;
+}
+
+DFhackCExport command_result plugin_onstatechange (color_ostream &out, state_change_event e)
+{
+    if (e == SC_BEGIN_UNLOAD && Gui::getCurFocus() == "dfhack/commandprompt")
+        return CR_FAILURE;
     return CR_OK;
 }
 

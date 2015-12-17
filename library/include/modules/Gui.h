@@ -38,6 +38,8 @@ distribution.
 #include "df/announcement_flags.h"
 #include "df/unit_report_type.h"
 
+#include "modules/GuiHooks.h"
+
 namespace df {
     struct viewscreen;
     struct job;
@@ -150,11 +152,24 @@ namespace DFHack
         DFHACK_EXPORT bool setDesignationCoords (const int32_t x, const int32_t y, const int32_t z);
 
         DFHACK_EXPORT bool getMousePos (int32_t & x, int32_t & y);
+
+        // The distance from the z-level of the tile at map coordinates (x, y) to the closest ground z-level below
+        // Defaults to 0, unless overriden by plugins
+        DFHACK_EXPORT int getDepthAt (int32_t x, int32_t y);
         /*
          * Gui screens
          */
         /// Get the current top-level view-screen
         DFHACK_EXPORT df::viewscreen *getCurViewscreen(bool skip_dismissed = false);
+
+        DFHACK_EXPORT df::viewscreen *getViewscreenByIdentity(virtual_identity &id, int n = 1);
+
+        /// Get the top-most viewscreen of the given type from the top `n` viewscreens (or all viewscreens if n < 1)
+        /// returns NULL if none match
+        template <typename T>
+        inline T *getViewscreenByType (int n = 1) {
+            return strict_virtual_cast<T>(getViewscreenByIdentity(T::_identity, n));
+        }
 
         inline std::string getCurFocus(bool skip_dismissed = false) {
             return getFocusString(getCurViewscreen(skip_dismissed));
@@ -174,5 +189,10 @@ namespace DFHack
 
         DFHACK_EXPORT bool getMenuWidth(uint8_t & menu_width, uint8_t & area_map_width);
         DFHACK_EXPORT bool setMenuWidth(const uint8_t menu_width, const uint8_t area_map_width);
+
+        namespace Hooks {
+            GUI_HOOK_DECLARE(depth_at, int, (int32_t x, int32_t y));
+            GUI_HOOK_DECLARE(dwarfmode_view_dims, DwarfmodeDims, ());
+        }
     }
 }

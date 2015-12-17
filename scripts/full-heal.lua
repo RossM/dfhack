@@ -2,14 +2,21 @@
 --author Kurik Amudnil, Urist DaVinci
 --edited by expwnent
 
--- attempt to fully heal a selected unit, option -r to attempt to resurrect the unit
+--[[=begin
+
+full-heal
+=========
+Attempts to fully heal the selected unit.  ``full-heal -r`` attempts to resurrect the unit.
+
+=end]]
 
 local utils=require('utils')
 
 validArgs = validArgs or utils.invert({
  'r',
  'help',
- 'unit'
+ 'unit',
+ 'keep_corpse'
 })
 
 local args = utils.processArgs({...}, validArgs)
@@ -20,6 +27,8 @@ if args.help then
     print('  heal the unit with the given id')
     print(' full-heal -r -unit [unitId]')
     print('  heal the unit with the given id and bring them back from death if they are dead')
+    print(' full-heal -r -keep_corpse -unit [unitId]')
+    print('  heal the unit with the given id and bring them back from death if they are dead, without removing their corpse')
     print(' full-heal')
     print('  heal the currently selected unit')
     print(' full-heal -r')
@@ -49,6 +58,15 @@ if unit then
         unit.flags1.dead = false
         unit.flags2.killed = false
         unit.flags3.ghostly = false
+        if not args.keep_corpse then
+            for _,corpse in ipairs(df.global.world.items.other.CORPSE) do
+                if corpse.unit_id==unit.id then
+                    corpse.flags.garbage_collect=true
+                    corpse.flags.forbid=true
+                    corpse.flags.hidden=true
+                end
+            end
+        end
         --unit.unk_100 = 3
     end
 

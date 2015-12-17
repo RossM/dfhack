@@ -1,6 +1,14 @@
 -- Save a copy of a text screen in markdown (for reddit among others). Use 'markdown help' for more details.
 -- This is a derivatiwe work based upon scripts/forum-dwarves.lua by Caldfir and expwnent
 -- Adapted for markdown by Mchl https://github.com/Mchl
+--[[=begin
+
+markdown
+========
+Save a copy of a text screen in markdown (for reddit among others).
+Use ``markdown help`` for more details.
+
+=end]]
 
 local args = {...}
 
@@ -46,7 +54,7 @@ target file:
 
 character encoding:
     The text will likely be using system-default encoding, and as such
-    will likely NOT display special characters (eg:é,õ,ç) correctly.  To
+    will likely NOT display special characters (eg:Ã©,Ãµ,Ã§) correctly.  To
     fix this, you need to modify the character set that you are reading
     the document with.  'Notepad++' is a freely available program which
     can do this using the following steps:

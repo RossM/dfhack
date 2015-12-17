@@ -1,3 +1,14 @@
+# convenient way to ban cooking categories of food
+=begin
+
+ban-cooking
+===========
+A more convenient way to ban cooking various categories of foods than the
+kitchen interface.  Usage:  ``ban-cooking <type>``.  Valid types are ``booze``,
+``honey``, ``tallow``, ``oil``, and ``seeds`` (non-tree plants with seeds).
+
+=end
+
 already_banned = {}
 kitchen = df.ui.kitchen
 kitchen.item_types.length.times { |i|
@@ -84,5 +95,3 @@ $script_args.each do |arg|
         puts "ban-cooking seeds  - bans cooking of plants that have seeds (tree seeds don't count)"
     end
 end
-
-# vim: et:sw=4:ts=4

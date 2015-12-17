@@ -33,6 +33,7 @@
 #include "df/entity_raw.h"
 
 #include "uicommon.h"
+#include "listcolumn.h"
 
 using std::stringstream;
 using std::set;
@@ -94,14 +95,6 @@ struct SkillColumn
     df::job_skill skill; // displayed rating
     char label[3]; // column header
     bool special; // specified labor is mutually exclusive with all other special labors
-    bool isValidLabor (df::historical_entity *entity = NULL) const
-    {
-        if (labor == unit_labor::NONE)
-            return false;
-        if (entity && entity->entity_raw && !entity->entity_raw->jobs.permitted_labor[labor])
-            return false;
-        return true;
-    }
 };
 
 #define NUM_COLUMNS (sizeof(columns) / sizeof(SkillColumn))
@@ -997,6 +990,8 @@ public:
     }
     void select_profession(size_t selected)
     {
+        if (selected >= manager.templates.size())
+            return;
         ProfessionTemplate prof = manager.templates[selected - 1];
 
         for (auto it = units.begin(); it != units.end(); ++it)
@@ -1012,6 +1007,11 @@ public:
         Screen::clear();
         int x = 2, y = 2;
         Screen::drawBorder("  Dwarf Manipulator - Custom Profession  ");
+        if (!manager.templates.size())
+        {
+            OutputString(COLOR_LIGHTRED, x, y, "No saved professions");
+            return;
+        }
         if (selection_empty)
         {
             OutputString(COLOR_LIGHTRED, x, y, "No dwarves selected!");
@@ -1623,9 +1623,10 @@ void viewscreen_unitlaborsst::feed(set<df::interface_key> *events)
     }
 
     UnitInfo *cur = units[input_row];
-    if (events->count(interface_key::SELECT) && (cur->allowEdit) && columns[input_column].isValidLabor(ui->main.fortress_entity))
+    df::unit *unit = cur->unit;
+    df::unit_labor cur_labor = columns[input_column].labor;
+    if (events->count(interface_key::SELECT) && (cur->allowEdit) && Units::isValidLabor(unit, cur_labor))
     {
-        df::unit *unit = cur->unit;
         const SkillColumn &col = columns[input_column];
         bool newstatus = !unit->status.labors[col.labor];
         if (col.special)
@@ -1642,16 +1643,15 @@ void viewscreen_unitlaborsst::feed(set<df::interface_key> *events)
         }
         unit->status.labors[col.labor] = newstatus;
     }
-    if (events->count(interface_key::SELECT_ALL) && (cur->allowEdit) && columns[input_column].isValidLabor(ui->main.fortress_entity))
+    if (events->count(interface_key::SELECT_ALL) && (cur->allowEdit) && Units::isValidLabor(unit, cur_labor))
     {
-        df::unit *unit = cur->unit;
         const SkillColumn &col = columns[input_column];
         bool newstatus = !unit->status.labors[col.labor];
         for (int i = 0; i < NUM_COLUMNS; i++)
         {
             if (columns[i].group != col.group)
                 continue;
-            if (!columns[i].isValidLabor(ui->main.fortress_entity))
+            if (!Units::isValidLabor(unit, columns[i].labor))
                 continue;
             if (columns[i].special)
             {
@@ -2047,7 +2047,7 @@ void viewscreen_unitlaborsst::render()
 
         }
 
-        canToggle = (cur->allowEdit) && columns[sel_column].isValidLabor(ui->main.fortress_entity);
+        canToggle = (cur->allowEdit) && Units::isValidLabor(unit, columns[sel_column].labor);
     }
 
     int x = 2, y = dim.y - 4;

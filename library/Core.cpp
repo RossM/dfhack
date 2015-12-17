@@ -32,6 +32,9 @@ distribution.
 #include <cstring>
 #include <iterator>
 #include <sstream>
+#include <forward_list>
+#include <type_traits>
+#include <cstdarg>
 using namespace std;
 
 #include "Error.h"
@@ -73,6 +76,7 @@ using namespace DFHack;
 #include <stdlib.h>
 #include <fstream>
 #include "tinythread.h"
+#include "md5wrapper.h"
 
 #include "SDL_events.h"
 
@@ -84,6 +88,7 @@ using df::global::world;
 // FIXME: A lot of code in one file, all doing different things... there's something fishy about it.
 
 static bool parseKeySpec(std::string keyspec, int *psym, int *pmod, std::string *pfocus = NULL);
+size_t loadScriptFiles(Core* core, color_ostream& out, const vector<std::string>& prefix, const std::string& folder);
 
 struct Core::Cond
 {
@@ -236,6 +241,17 @@ struct sortable
     };
 };
 
+static string dfhack_version_desc()
+{
+    stringstream s;
+    s << Version::dfhack_version() << " ";
+    if (Version::is_release())
+        s << "(release)";
+    else
+        s << "(development build " << Version::git_description() << ")";
+    return s.str();
+}
+
 static std::string getScriptHelp(std::string path, std::string helpprefix)
 {
     ifstream script(path.c_str());
@@ -245,7 +261,12 @@ static std::string getScriptHelp(std::string path, std::string helpprefix)
         std::string help;
         if (getline(script, help) &&
             help.substr(0,helpprefix.length()) == helpprefix)
-            return help.substr(helpprefix.length());
+        {
+            help = help.substr(helpprefix.length());
+            while (help.size() && help[0] == ' ')
+                help = help.substr(1);
+            return help;
+        }
     }
 
     return "No help available.";
@@ -260,13 +281,13 @@ static void listScripts(PluginManager *plug_mgr, std::map<string,string> &pset, 
     {
         if (hasEnding(files[i], ".lua"))
         {
-            std::string help = getScriptHelp(path + files[i], "-- ");
+            std::string help = getScriptHelp(path + files[i], "--");
 
             pset[prefix + files[i].substr(0, files[i].size()-4)] = help;
         }
         else if (plug_mgr->ruby && plug_mgr->ruby->is_enabled() && hasEnding(files[i], ".rb"))
         {
-            std::string help = getScriptHelp(path + files[i], "# ");
+            std::string help = getScriptHelp(path + files[i], "#");
 
             pset[prefix + files[i].substr(0, files[i].size()-3)] = help;
         }
@@ -287,6 +308,10 @@ namespace {
     struct ScriptArgs {
         const string *pcmd;
         vector<string> *pargs;
+    };
+    struct ScriptEnableState {
+        const string *pcmd;
+        bool pstate;
     };
 }
 
@@ -311,6 +336,30 @@ static command_result runLuaScript(color_ostream &out, std::string name, vector<
     data.pargs = &args;
 
     bool ok = Lua::RunCoreQueryLoop(out, Lua::Core::State, init_run_script, &data);
+
+    return ok ? CR_OK : CR_FAILURE;
+}
+
+static bool init_enable_script(color_ostream &out, lua_State *state, void *info)
+{
+    auto args = (ScriptEnableState*)info;
+    if (!lua_checkstack(state, 4))
+        return false;
+    Lua::PushDFHack(state);
+    lua_getfield(state, -1, "enable_script");
+    lua_remove(state, -2);
+    lua_pushstring(state, args->pcmd->c_str());
+    lua_pushboolean(state, args->pstate);
+    return true;
+}
+
+static command_result enableLuaScript(color_ostream &out, std::string name, bool state)
+{
+    ScriptEnableState data;
+    data.pcmd = &name;
+    data.pstate = state;
+
+    bool ok = Lua::RunCoreQueryLoop(out, Lua::Core::State, init_enable_script, &data);
 
     return ok ? CR_OK : CR_FAILURE;
 }
@@ -357,12 +406,12 @@ static bool try_autocomplete(color_ostream &con, const std::string &first, std::
     std::vector<std::string> possible;
 
     auto plug_mgr = Core::getInstance().getPluginManager();
-    for(size_t i = 0; i < plug_mgr->size(); i++)
+    for (auto it = plug_mgr->begin(); it != plug_mgr->end(); ++it)
     {
-        const Plugin * plug = (plug_mgr->operator[](i));
+        const Plugin * plug = it->second;
         for (size_t j = 0; j < plug->size(); j++)
         {
-            const PluginCommand &pcmd = plug->operator[](j);
+            const PluginCommand &pcmd = (*plug)[j];
             if (pcmd.isHotkeyCommand())
                 continue;
             if (pcmd.name.substr(0, first.size()) == first)
@@ -398,24 +447,65 @@ static bool try_autocomplete(color_ostream &con, const std::string &first, std::
     return false;
 }
 
-string findScript(string path, string name) {
-    if (df::global::world) {
-        //first try the save folder if it exists
-        string save = World::ReadWorldFolder();
-        if ( save != "" ) {
-            string file = path + "/data/save/" + save + "/raw/scripts/" + name;
-            if (fileExists(file)) {
-                return file;
-            }
+bool Core::addScriptPath(string path, bool search_before)
+{
+    lock_guard<mutex> lock(*script_path_mutex);
+    vector<string> &vec = script_paths[search_before ? 0 : 1];
+    if (std::find(vec.begin(), vec.end(), path) != vec.end())
+        return false;
+    if (!Filesystem::isdir(path))
+        return false;
+    vec.push_back(path);
+    return true;
+}
+
+bool Core::removeScriptPath(string path)
+{
+    lock_guard<mutex> lock(*script_path_mutex);
+    bool found = false;
+    for (int i = 0; i < 2; i++)
+    {
+        vector<string> &vec = script_paths[i];
+        while (1)
+        {
+            auto it = std::find(vec.begin(), vec.end(), path);
+            if (it == vec.end())
+                break;
+            vec.erase(it);
+            found = true;
         }
     }
-    string file = path + "/raw/scripts/" + name;
-    if (fileExists(file)) {
-        return file;
+    return found;
+}
+
+void Core::getScriptPaths(std::vector<std::string> *dest)
+{
+    lock_guard<mutex> lock(*script_path_mutex);
+    dest->clear();
+    string df_path = this->p->getPath();
+    for (auto it = script_paths[0].begin(); it != script_paths[0].end(); ++it)
+        dest->push_back(*it);
+    if (df::global::world && isWorldLoaded()) {
+        string save = World::ReadWorldFolder();
+        if (save.size())
+            dest->push_back(df_path + "/data/save/" + save + "/raw/scripts");
     }
-    file = path + "/hack/scripts/" + name;
-    if (fileExists(file)) {
-        return file;
+    dest->push_back(df_path + "/raw/scripts");
+    dest->push_back(df_path + "/hack/scripts");
+    for (auto it = script_paths[1].begin(); it != script_paths[1].end(); ++it)
+        dest->push_back(*it);
+}
+
+
+string Core::findScript(string name)
+{
+    vector<string> paths;
+    getScriptPaths(&paths);
+    for (auto it = paths.begin(); it != paths.end(); ++it)
+    {
+        string path = *it + "/" + name;
+        if (Filesystem::isfile(path))
+            return path;
     }
     return "";
 }
@@ -456,6 +546,42 @@ static std::string sc_event_name (state_change_event id) {
     return "SC_UNKNOWN";
 }
 
+string getBuiltinCommand(std::string cmd)
+{
+    std::string builtin = "";
+    if (cmd == "ls" ||
+        cmd == "help" ||
+        cmd == "type" ||
+        cmd == "load" ||
+        cmd == "unload" ||
+        cmd == "reload" ||
+        cmd == "enable" ||
+        cmd == "disable" ||
+        cmd == "plug" ||
+        cmd == "keybinding" ||
+        cmd == "fpause" ||
+        cmd == "cls" ||
+        cmd == "die" ||
+        cmd == "kill-lua" ||
+        cmd == "script" ||
+        cmd == "hide" ||
+        cmd == "show" ||
+        cmd == "sc-script"
+    )
+        builtin = cmd;
+
+    else if (cmd == "?" || cmd == "man")
+        builtin = "help";
+
+    else if (cmd == "dir")
+        builtin = "ls";
+
+    else if (cmd == "clear")
+        builtin = "cls";
+
+    return builtin;
+}
+
 command_result Core::runCommand(color_ostream &con, const std::string &first_, vector<string> &parts)
 {
     std::string first = first_;
@@ -470,8 +596,10 @@ command_result Core::runCommand(color_ostream &con, const std::string &first_, v
                     first[i] = '/';
             }
         }
+
         // let's see what we actually got
-        if(first=="help" || first == "?" || first == "man")
+        string builtin = getBuiltinCommand(first);
+        if (builtin == "help")
         {
             if(!parts.size())
             {
@@ -487,21 +615,26 @@ command_result Core::runCommand(color_ostream &con, const std::string &first_, v
                           "  help|?|man            - This text.\n"
                           "  help COMMAND          - Usage help for the given command.\n"
                           "  ls|dir [-a] [PLUGIN]  - List available commands. Optionally for single plugin.\n"
-                          "  cls                   - Clear the console.\n"
+                          "  cls|clear             - Clear the console.\n"
                           "  fpause                - Force DF to pause.\n"
                           "  die                   - Force DF to close immediately\n"
                           "  keybinding            - Modify bindings of commands to keys\n"
                           "Plugin management (useful for developers):\n"
                           "  plug [PLUGIN|v]       - List plugin state and description.\n"
-                          "  load PLUGIN|all       - Load a plugin by name or load all possible plugins.\n"
-                          "  unload PLUGIN|all     - Unload a plugin or all loaded plugins.\n"
-                          "  reload PLUGIN|all     - Reload a plugin or all loaded plugins.\n"
+                          "  load PLUGIN|-all      - Load a plugin by name or load all possible plugins.\n"
+                          "  unload PLUGIN|-all    - Unload a plugin or all loaded plugins.\n"
+                          "  reload PLUGIN|-all    - Reload a plugin or all loaded plugins.\n"
                          );
 
-                con.print("\nDFHack version %s.\n", get_dfhack_version());
+                con.print("\nDFHack version %s\n", dfhack_version_desc().c_str());
             }
             else if (parts.size() == 1)
             {
+                if (getBuiltinCommand(parts[0]).size())
+                {
+                    con << parts[0] << ": built-in command; Use `ls`, `help`, or check hack/Readme.html for more information" << std::endl;
+                    return CR_NOT_IMPLEMENTED;
+                }
                 Plugin *plug = plug_mgr->getPluginByCommand(parts[0]);
                 if (plug) {
                     for (size_t j = 0; j < plug->size();j++)
@@ -519,113 +652,73 @@ command_result Core::runCommand(color_ostream &con, const std::string &first_, v
                         return CR_OK;
                     }
                 }
-                string path = this->p->getPath();
-                string file = findScript(path, parts[0] + ".lua");
+                string file = findScript(parts[0] + ".lua");
                 if ( file != "" ) {
-                    string help = getScriptHelp(file, "-- ");
+                    string help = getScriptHelp(file, "--");
                     con.print("%s: %s\n", parts[0].c_str(), help.c_str());
                     return CR_OK;
                 }
                 if (plug_mgr->ruby && plug_mgr->ruby->is_enabled() ) {
-                    file = findScript(path, parts[0] + ".rb");
+                    file = findScript(parts[0] + ".rb");
                     if ( file != "" ) {
-                        string help = getScriptHelp(file, "# ");
+                        string help = getScriptHelp(file, "#");
                         con.print("%s: %s\n", parts[0].c_str(), help.c_str());
                         return CR_OK;
                     }
                 }
                 con.printerr("Unknown command: %s\n", parts[0].c_str());
+                return CR_FAILURE;
             }
             else
             {
                 con.printerr("not implemented yet\n");
+                return CR_NOT_IMPLEMENTED;
             }
         }
-        else if( first == "load" )
+        else if (builtin == "load" || builtin == "unload" || builtin == "reload")
         {
-            if(parts.size())
+            bool all = false;
+            bool load = (builtin == "load");
+            bool unload = (builtin == "unload");
+            if (parts.size())
             {
-                string & plugname = parts[0];
-                if(plugname == "all")
+                for (auto p = parts.begin(); p != parts.end(); p++)
                 {
-                    for(size_t i = 0; i < plug_mgr->size();i++)
+                    if (p->size() && (*p)[0] == '-')
                     {
-                        Plugin * plug = (plug_mgr->operator[](i));
-                        plug->load(con);
+                        if (p->find('a') != string::npos)
+                            all = true;
                     }
                 }
-                else
+                if (all)
                 {
-                    Plugin * plug = plug_mgr->getPluginByName(plugname);
-                    if(!plug)
-                    {
-                        con.printerr("No such plugin\n");
-                    }
+                    if (load)
+                        plug_mgr->loadAll();
+                    else if (unload)
+                        plug_mgr->unloadAll();
                     else
-                    {
-                        plug->load(con);
-                    }
+                        plug_mgr->reloadAll();
+                    return CR_OK;
+                }
+                for (auto p = parts.begin(); p != parts.end(); p++)
+                {
+                    if (!p->size() || (*p)[0] == '-')
+                        continue;
+                    if (load)
+                        plug_mgr->load(*p);
+                    else if (unload)
+                        plug_mgr->unload(*p);
+                    else
+                        plug_mgr->reload(*p);
                 }
             }
+            else
+                con.printerr("%s: no arguments\n", builtin.c_str());
         }
-        else if( first == "reload" )
-        {
-            if(parts.size())
-            {
-                string & plugname = parts[0];
-                if(plugname == "all")
-                {
-                    for(size_t i = 0; i < plug_mgr->size();i++)
-                    {
-                        Plugin * plug = (plug_mgr->operator[](i));
-                        plug->reload(con);
-                    }
-                }
-                else
-                {
-                    Plugin * plug = plug_mgr->getPluginByName(plugname);
-                    if(!plug)
-                    {
-                        con.printerr("No such plugin\n");
-                    }
-                    else
-                    {
-                        plug->reload(con);
-                    }
-                }
-            }
-        }
-        else if( first == "unload" )
-        {
-            if(parts.size())
-            {
-                string & plugname = parts[0];
-                if(plugname == "all")
-                {
-                    for(size_t i = 0; i < plug_mgr->size();i++)
-                    {
-                        Plugin * plug = (plug_mgr->operator[](i));
-                        plug->unload(con);
-                    }
-                }
-                else
-                {
-                    Plugin * plug = plug_mgr->getPluginByName(plugname);
-                    if(!plug)
-                    {
-                        con.printerr("No such plugin\n");
-                    }
-                    else
-                    {
-                        plug->unload(con);
-                    }
-                }
-            }
-        }
-        else if( first == "enable" || first == "disable" )
+        else if( builtin == "enable" || builtin == "disable" )
         {
             CoreSuspender suspend;
-            bool enable = (first == "enable");
+            bool enable = (builtin == "enable");
 
             if(parts.size())
             {
@@ -633,24 +726,43 @@ command_result Core::runCommand(color_ostream &con, const std::string &first_, v
 
                 for (size_t i = 0; i < parts.size(); i++)
                 {
-                    Plugin * plug = plug_mgr->getPluginByName(parts[i]);
+                    std::string part = parts[i];
+                    if (part.find('\\') != std::string::npos)
+                    {
+                        con.printerr("Replacing backslashes with forward slashes in \"%s\"\n", part.c_str());
+                        for (size_t j = 0; j < part.size(); j++)
+                        {
+                            if (part[j] == '\\')
+                                part[j] = '/';
+                        }
+                    }
+
+                    Plugin * plug = (*plug_mgr)[part];
 
                     if(!plug)
                     {
-                        res = CR_NOT_FOUND;
-                        con.printerr("No such plugin: %s\n", parts[i].c_str());
+                        std::string lua = findScript(part + ".lua");
+                        if (lua.size())
+                        {
+                            res = enableLuaScript(con, part, enable);
+                        }
+                        else
+                        {
+                            res = CR_NOT_FOUND;
+                            con.printerr("No such plugin or Lua script: %s\n", part.c_str());
+                        }
                     }
                     else if (!plug->can_set_enabled())
                     {
                         res = CR_NOT_IMPLEMENTED;
-                        con.printerr("Cannot %s plugin: %s\n", first.c_str(), parts[i].c_str());
+                        con.printerr("Cannot %s plugin: %s\n", builtin.c_str(), part.c_str());
                     }
                     else
                     {
                         res = plug->set_enabled(con, enable);
 
                         if (res != CR_OK || plug->is_enabled() != enable)
-                            con.printerr("Could not %s plugin: %s\n", first.c_str(), parts[i].c_str());
+                            con.printerr("Could not %s plugin: %s\n", builtin.c_str(), part.c_str());
                     }
                 }
 
@@ -658,9 +770,9 @@ command_result Core::runCommand(color_ostream &con, const std::string &first_, v
             }
             else
             {
-                for(size_t i = 0; i < plug_mgr->size();i++)
+                for (auto it = plug_mgr->begin(); it != plug_mgr->end(); ++it)
                 {
-                    Plugin * plug = (plug_mgr->operator[](i));
+                    Plugin * plug = it->second;
                     if (!plug->can_be_enabled()) continue;
 
                     con.print(
@@ -672,7 +784,7 @@ command_result Core::runCommand(color_ostream &con, const std::string &first_, v
                 }
             }
         }
-        else if(first == "ls" || first == "dir")
+        else if (builtin == "ls" || builtin == "dir")
         {
             bool all = false;
             if (parts.size() && parts[0] == "-a")
@@ -683,10 +795,18 @@ command_result Core::runCommand(color_ostream &con, const std::string &first_, v
             if(parts.size())
             {
                 string & plugname = parts[0];
-                const Plugin * plug = plug_mgr->getPluginByName(plugname);
+                const Plugin * plug = (*plug_mgr)[plugname];
                 if(!plug)
                 {
-                    con.printerr("There's no plugin called %s!\n",plugname.c_str());
+                    con.printerr("There's no plugin called %s!\n", plugname.c_str());
+                }
+                else if (plug->getState() != Plugin::PS_LOADED)
+                {
+                    con.printerr("Plugin %s is not loaded.\n", plugname.c_str());
+                }
+                else if (!plug->size())
+                {
+                    con.printerr("Plugin %s is loaded but does not implement any commands.\n", plugname.c_str());
                 }
                 else for (size_t j = 0; j < plug->size();j++)
                 {
@@ -701,26 +821,28 @@ command_result Core::runCommand(color_ostream &con, const std::string &first_, v
             {
                 con.print(
                 "builtin:\n"
-                "  help|?|man            - This text or help specific to a plugin.\n"
-                "  ls [-a] [PLUGIN]      - List available commands. Optionally for single plugin.\n"
-                "  cls                   - Clear the console.\n"
-                "  fpause                - Force DF to pause.\n"
-                "  die                   - Force DF to close immediately\n"
-                "  keybinding            - Modify bindings of commands to keys\n"
-                "  script FILENAME       - Run the commands specified in a file.\n"
-                "  sc-script             - Automatically run specified scripts on state change events\n"
-                "  plug [PLUGIN|v]       - List plugin state and detailed description.\n"
-                "  load PLUGIN|all       - Load a plugin by name or load all possible plugins.\n"
-                "  unload PLUGIN|all     - Unload a plugin or all loaded plugins.\n"
-                "  reload PLUGIN|all     - Reload a plugin or all loaded plugins.\n"
-                "  enable/disable PLUGIN - Enable or disable a plugin if supported.\n"
+                "  help|?|man                  - This text or help specific to a plugin.\n"
+                "  ls|dir [-a] [PLUGIN]        - List available commands. Optionally for single plugin.\n"
+                "  cls|clear                   - Clear the console.\n"
+                "  fpause                      - Force DF to pause.\n"
+                "  die                         - Force DF to close immediately\n"
+                "  kill-lua                    - Stop an active Lua script\n"
+                "  keybinding                  - Modify bindings of commands to keys\n"
+                "  script FILENAME             - Run the commands specified in a file.\n"
+                "  sc-script                   - Automatically run specified scripts on state change events\n"
+                "  plug [PLUGIN|v]             - List plugin state and detailed description.\n"
+                "  load PLUGIN|-all [...]      - Load a plugin by name or load all possible plugins.\n"
+                "  unload PLUGIN|-all [...]    - Unload a plugin or all loaded plugins.\n"
+                "  reload PLUGIN|-all [...]    - Reload a plugin or all loaded plugins.\n"
+                "  enable/disable PLUGIN [...] - Enable or disable a plugin if supported.\n"
+                "  type COMMAND                - Display information about where a command is implemented\n"
                 "\n"
                 "plugins:\n"
                 );
                 std::set <sortable> out;
-                for(size_t i = 0; i < plug_mgr->size();i++)
+                for (auto it = plug_mgr->begin(); it != plug_mgr->end(); ++it)
                 {
-                    const Plugin * plug = (plug_mgr->operator[](i));
+                    const Plugin * plug = it->second;
                     if(!plug->size())
                         continue;
                     for (size_t j = 0; j < plug->size();j++)
@@ -746,17 +868,93 @@ command_result Core::runCommand(color_ostream &con, const std::string &first_, v
                 }
             }
         }
-        else if(first == "plug")
+        else if (builtin == "plug")
         {
-            for(size_t i = 0; i < plug_mgr->size();i++)
+            const char *header_format = "%25s %10s %4s %8s\n";
+            const char *row_format =    "%25s %10s %4i %8s\n";
+            con.print(header_format, "Name", "State", "Cmds", "Enabled");
+
+            plug_mgr->refresh();
+            for (auto it = plug_mgr->begin(); it != plug_mgr->end(); ++it)
             {
-                const Plugin * plug = (plug_mgr->operator[](i));
-                if(!plug->size())
+                Plugin * plug = it->second;
+                if (!plug)
                     continue;
-                con.print("%s\n", plug->getName().c_str());
+                if (parts.size() && std::find(parts.begin(), parts.end(), plug->getName()) == parts.end())
+                    continue;
+                color_value color;
+                switch (plug->getState())
+                {
+                    case Plugin::PS_LOADED:
+                        color = COLOR_RESET;
+                        break;
+                    case Plugin::PS_UNLOADED:
+                    case Plugin::PS_UNLOADING:
+                        color = COLOR_YELLOW;
+                        break;
+                    case Plugin::PS_LOADING:
+                        color = COLOR_LIGHTBLUE;
+                        break;
+                    case Plugin::PS_BROKEN:
+                        color = COLOR_LIGHTRED;
+                        break;
+                    default:
+                        color = COLOR_LIGHTMAGENTA;
+                        break;
+                }
+                con.color(color);
+                con.print(row_format,
+                    plug->getName().c_str(),
+                    Plugin::getStateDescription(plug->getState()),
+                    plug->size(),
+                    (plug->can_be_enabled()
+                        ? (plug->is_enabled() ? "enabled" : "disabled")
+                        : "n/a")
+                );
+                con.color(COLOR_RESET);
             }
         }
-        else if(first == "keybinding")
+        else if (builtin == "type")
+        {
+            if (!parts.size())
+            {
+                con.printerr("type: no argument\n");
+                return CR_WRONG_USAGE;
+            }
+            con << parts[0];
+            string builtin_cmd = getBuiltinCommand(parts[0]);
+            string lua_path = findScript(parts[0] + ".lua");
+            string ruby_path = findScript(parts[0] + ".rb");
+            Plugin *plug = plug_mgr->getPluginByCommand(parts[0]);
+            if (builtin_cmd.size())
+            {
+                con << " is a built-in command";
+                if (builtin_cmd != parts[0])
+                    con << " (aliased to " << builtin_cmd << ")";
+                con << std::endl;
+            }
+            else if (plug)
+            {
+                con << " is a command implemented by the plugin " << plug->getName() << std::endl;
+            }
+            else if (lua_path.size())
+            {
+                con << " is a Lua script: " << lua_path << std::endl;
+            }
+            else if (ruby_path.size())
+            {
+                con << " is a Ruby script: " << ruby_path << std::endl;
+            }
+            else
+            {
+                con << " is not a recognized command." << std::endl;
+                plug = plug_mgr->getPluginByName(parts[0]);
+                if (plug)
+                    con << "Plugin " << parts[0] << " exists and implements " << plug->size() << " commands." << std::endl;
+                return CR_FAILURE;
+            }
+        }
+        else if (builtin == "keybinding")
         {
             if (parts.size() >= 3 && (parts[0] == "set" || parts[0] == "add"))
             {
@@ -804,12 +1002,12 @@ command_result Core::runCommand(color_ostream &con, const std::string &first_, v
                     << Gui::getFocusString(Core::getTopViewscreen()) << endl;
             }
         }
-        else if(first == "fpause")
+        else if (builtin == "fpause")
         {
             World::SetPauseState(true);
             con.print("The game was forced to pause!\n");
         }
-        else if(first == "cls")
+        else if (builtin == "cls")
         {
             if (con.is_console())
                 ((Console&)con).clear();
@@ -819,11 +1017,22 @@ command_result Core::runCommand(color_ostream &con, const std::string &first_, v
                 return CR_NEEDS_CONSOLE;
             }
         }
-        else if(first == "die")
+        else if (builtin == "die")
         {
             _exit(666);
         }
-        else if(first == "script")
+        else if (builtin == "kill-lua")
+        {
+            bool force = false;
+            for (auto it = parts.begin(); it != parts.end(); ++it)
+            {
+                if (*it == "force")
+                    force = true;
+            }
+            if (!Lua::Interrupt(force))
+                con.printerr("Failed to register hook - use 'kill-lua force' to force\n");
+        }
+        else if (builtin == "script")
         {
             if(parts.size() == 1)
             {
@@ -836,7 +1045,7 @@ command_result Core::runCommand(color_ostream &con, const std::string &first_, v
                 return CR_WRONG_USAGE;
             }
         }
-        else if(first=="hide")
+        else if (builtin=="hide")
         {
             if (!getConsole().hide())
             {
@@ -845,7 +1054,7 @@ command_result Core::runCommand(color_ostream &con, const std::string &first_, v
             }
             return CR_OK;
         }
-        else if(first=="show")
+        else if (builtin=="show")
         {
             if (!getConsole().show())
             {
@@ -854,7 +1063,7 @@ command_result Core::runCommand(color_ostream &con, const std::string &first_, v
             }
             return CR_OK;
         }
-        else if(first == "sc-script")
+        else if (builtin == "sc-script")
         {
             if (parts.size() < 1)
             {
@@ -958,20 +1167,35 @@ command_result Core::runCommand(color_ostream &con, const std::string &first_, v
             if(res == CR_NOT_IMPLEMENTED)
             {
                 string completed;
-                string path = this->p->getPath();
-                string filename = findScript(path, first + ".lua");
+                string filename = findScript(first + ".lua");
                 bool lua = filename != "";
                 if ( !lua ) {
-                    filename = findScript(path, first + ".rb");
+                    filename = findScript(first + ".rb");
                 }
                 if ( lua )
                     res = runLuaScript(con, first, parts);
                 else if ( filename != "" && plug_mgr->ruby && plug_mgr->ruby->is_enabled() )
                     res = runRubyScript(con, plug_mgr, first, parts);
                 else if ( try_autocomplete(con, first, completed) )
-                    return CR_NOT_IMPLEMENTED;
+                    res = CR_NOT_IMPLEMENTED;
                 else
                     con.printerr("%s is not a recognized command.\n", first.c_str());
+                if (res == CR_NOT_IMPLEMENTED)
+                {
+                    Plugin *p = plug_mgr->getPluginByName(first);
+                    if (p)
+                    {
+                        con.printerr("%s is a plugin ", first.c_str());
+                        if (p->getState() == Plugin::PS_UNLOADED)
+                            con.printerr("that is not loaded - try \"load %s\" or check stderr.log\n",
+                                first.c_str());
+                        else if (p->size())
+                            con.printerr("that implements %i commands - see \"ls %s\" for details\n",
+                                p->size(), first.c_str());
+                        else
+                            con.printerr("but does not implement any commands\n");
+                    }
+                }
             }
             else if (res == CR_NEEDS_CONSOLE)
                 con.printerr("%s needs interactive console to work.\n", first.c_str());
@@ -1029,7 +1253,9 @@ static void run_dfhack_init(color_ostream &out, Core *core)
         return;
     }
 
-    if (!core->loadScriptFile(out, "dfhack.init", true))
+    std::vector<std::string> prefixes(1, "dfhack");
+    size_t count = loadScriptFiles(core, out, prefixes, ".");
+    if (!count)
     {
         core->runCommand(out, "gui/no-dfhack-init");
         core->loadScriptFile(out, "dfhack.init-example", true);
@@ -1066,7 +1292,9 @@ void fIOthread(void * iodata)
     run_dfhack_init(con, core);
 
     con.print("DFHack is ready. Have a nice day!\n"
-              "Type in '?' or 'help' for general help, 'ls' to see all commands.\n");
+              "DFHack version %s\n"
+              "Type in '?' or 'help' for general help, 'ls' to see all commands.\n",
+              dfhack_version_desc().c_str());
 
     int clueless_counter = 0;
     while (true)
@@ -1097,7 +1325,7 @@ void fIOthread(void * iodata)
 
         if(clueless_counter == 3)
         {
-            con.print("Do 'help' or '?' for the list of available commands.\n");
+            con.print("Run 'help' or '?' for the list of available commands.\n");
             clueless_counter = 0;
         }
     }
@@ -1129,17 +1357,23 @@ Core::Core()
     server = NULL;
 
     color_ostream::log_errors_to_stderr = true;
+
+    script_path_mutex = new mutex();
 };
 
-void Core::fatal (std::string output, bool deactivate)
+void Core::fatal (std::string output)
 {
+    errorstate = true;
     stringstream out;
     out << output ;
-    if(deactivate)
-        out << "DFHack will now deactivate.\n";
+    if (output[output.size() - 1] != '\n')
+        out << '\n';
+    out << "DFHack will now deactivate.\n";
     if(con.isInited())
     {
         con.printerr("%s", out.str().c_str());
+        con.reset_color();
+        con.print("\n");
     }
     fprintf(stderr, "%s\n", out.str().c_str());
 #ifndef LINUX_BUILD
@@ -1168,6 +1402,8 @@ bool Core::Init()
     if(errorstate)
         return false;
 
+    fprintf(stderr, "DFHack build: %s\n", Version::git_description());
+
     // find out what we are...
     #ifdef LINUX_BUILD
         const char * path = "hack/symbols.xml";
@@ -1188,7 +1424,7 @@ bool Core::Init()
         delete vif;
         vif = NULL;
         errorstate = true;
-        fatal(out.str(), true);
+        fatal(out.str());
         return false;
     }
     p = new DFHack::Process(vif);
@@ -1196,7 +1432,7 @@ bool Core::Init()
 
     if(!vinfo || !p->isIdentified())
     {
-        fatal ("Not a known DF version.\n", true);
+        fatal("Not a known DF version.\n");
         errorstate = true;
         delete p;
         p = NULL;
@@ -1222,7 +1458,7 @@ bool Core::Init()
     else if(con.init(false))
         cerr << "Console is running.\n";
     else
-        fatal ("Console has failed to initialize!\n", false);
+        cerr << "Console has failed to initialize!\n";
 /*
     // dump offsets to a file
     std::ofstream dump("offsets.log");
@@ -1236,15 +1472,51 @@ bool Core::Init()
     virtual_identity::Init(this);
     init_screen_module(this);
 
+    // copy over default config files if necessary
+    std::vector<std::string> config_files;
+    std::vector<std::string> default_config_files;
+    if (Filesystem::listdir("dfhack-config", config_files) != 0)
+        con.printerr("Failed to list directory: dfhack-config");
+    else if (Filesystem::listdir("dfhack-config/default", default_config_files) != 0)
+        con.printerr("Failed to list directory: dfhack-config/default");
+    else
+    {
+        for (auto it = default_config_files.begin(); it != default_config_files.end(); ++it)
+        {
+            std::string filename = *it;
+            if (std::find(config_files.begin(), config_files.end(), filename) == config_files.end())
+            {
+                std::string src_file = std::string("dfhack-config/default/") + filename;
+                if (!Filesystem::isfile(src_file))
+                    continue;
+                std::string dest_file = std::string("dfhack-config/") + filename;
+                std::ifstream src(src_file, std::ios::binary);
+                std::ofstream dest(dest_file, std::ios::binary);
+                if (!src.good() || !dest.good())
+                {
+                    con.printerr("Copy failed: %s\n", filename.c_str());
+                    continue;
+                }
+                dest << src.rdbuf();
+                src.close();
+                dest.close();
+            }
+        }
+    }
+
     // initialize common lua context
-    Lua::Core::Init(con);
+    if (!Lua::Core::Init(con))
+    {
+        fatal("Lua failed to initialize");
+        return false;
+    }
 
     // create mutex for syncing with interactive tasks
     misc_data_mutex=new mutex();
     cerr << "Initializing Plugins.\n";
     // create plugin manager
     plug_mgr = new PluginManager(this);
-    plug_mgr->init(this);
+    plug_mgr->init();
     IODATA *temp = new IODATA;
     temp->core = this;
     temp->plug_mgr = plug_mgr;
@@ -1465,6 +1737,14 @@ void Core::doUpdate(color_ostream &out, bool first_update)
             screen = screen->child;
     }
 
+    // detect if the viewscreen changed, and trigger events later
+    bool vs_changed = false;
+    if (screen != top_viewscreen)
+    {
+        top_viewscreen = screen;
+        vs_changed = true;
+    }
+
     bool is_load_save =
         strict_virtual_cast<df::viewscreen_game_cleanerst>(screen) ||
         strict_virtual_cast<df::viewscreen_loadgamest>(screen) ||
@@ -1514,12 +1794,8 @@ void Core::doUpdate(color_ostream &out, bool first_update)
         }
     }
 
-    // detect if the viewscreen changed
-    if (screen != top_viewscreen)
-    {
-        top_viewscreen = screen;
+    if (vs_changed)
         onStateChange(out, SC_VIEWSCREEN_CHANGED);
-    }
 
     if (df::global::pause_state)
     {
@@ -1610,37 +1886,92 @@ void Core::onUpdate(color_ostream &out)
     Lua::Core::onUpdate(out);
 }
 
+void getFilesWithPrefixAndSuffix(const std::string& folder, const std::string& prefix, const std::string& suffix, std::vector<std::string>& result) {
+    //DFHACK_EXPORT int listdir (std::string dir, std::vector<std::string> &files);
+    std::vector<std::string> files;
+    DFHack::Filesystem::listdir(folder, files);
+    for ( size_t a = 0; a < files.size(); a++ ) {
+        if ( prefix.length() > files[a].length() )
+            continue;
+        if ( suffix.length() > files[a].length() )
+            continue;
+        if ( files[a].compare(0, prefix.length(), prefix) != 0 )
+            continue;
+        if ( files[a].compare(files[a].length()-suffix.length(), suffix.length(), suffix) != 0 )
+            continue;
+        result.push_back(files[a]);
+    }
+    return;
+}
+
+size_t loadScriptFiles(Core* core, color_ostream& out, const vector<std::string>& prefix, const std::string& folder) {
+    vector<std::string> scriptFiles;
+    for ( size_t a = 0; a < prefix.size(); a++ ) {
+        getFilesWithPrefixAndSuffix(folder, prefix[a], ".init", scriptFiles);
+    }
+    std::sort(scriptFiles.begin(), scriptFiles.end());
+    size_t result = 0;
+    for ( size_t a = 0; a < scriptFiles.size(); a++ ) {
+        result++;
+        core->loadScriptFile(out, folder + "/" + scriptFiles[a], true);
+    }
+    return result;
+}
+
+namespace DFHack {
+    namespace X {
+        typedef state_change_event Key;
+        typedef vector<string> Val;
+        typedef pair<Key,Val> Entry;
+        typedef vector<Entry> EntryVector;
+        typedef map<Key,Val> InitVariationTable;
+
+        EntryVector computeInitVariationTable(void* none, ...) {
+            va_list list;
+            va_start(list,none);
+            EntryVector result;
+            while(true) {
+                Key key = (Key)va_arg(list,int);
+                if ( key == SC_UNKNOWN )
+                    break;
+                Val val;
+                while (true) {
+                    const char *v = va_arg(list, const char *);
+                    if (!v || !v[0])
+                        break;
+                    val.push_back(string(v));
+                }
+                result.push_back(Entry(key,val));
+            }
+            va_end(list);
+            return result;
+        }
+
+        InitVariationTable getTable(const EntryVector& vec) {
+            return InitVariationTable(vec.begin(),vec.end());
+        }
+    }
+}
+
 void Core::handleLoadAndUnloadScripts(color_ostream& out, state_change_event event) {
+    static const X::InitVariationTable table = X::getTable(X::computeInitVariationTable(0,
+        (int)SC_WORLD_LOADED, "onLoad", "onLoadWorld", "onWorldLoaded", "",
+        (int)SC_WORLD_UNLOADED, "onUnload", "onUnloadWorld", "onWorldUnloaded", "",
+        (int)SC_MAP_LOADED, "onMapLoad", "onLoadMap", "",
+        (int)SC_MAP_UNLOADED, "onMapUnload", "onUnloadMap", "",
+        (int)SC_UNKNOWN
+    ));
+
     if (!df::global::world)
         return;
-    //TODO: use different separators for windows
-#ifdef _WIN32
-    static const std::string separator = "\\";
-#else
-    static const std::string separator = "/";
-#endif
-    std::string rawFolder = "data" + separator + "save" + separator + (df::global::world->cur_savegame.save_dir) + separator + "raw" + separator;
-    switch(event) {
-    case SC_WORLD_LOADED:
-        loadScriptFile(out, "onLoadWorld.init", true);
-        loadScriptFile(out, rawFolder + "onLoadWorld.init", true);
-        loadScriptFile(out, rawFolder + "onLoad.init", true);
-        break;
-    case SC_WORLD_UNLOADED:
-        loadScriptFile(out, "onUnloadWorld.init", true);
-        loadScriptFile(out, rawFolder + "onUnloadWorld.init", true);
-        loadScriptFile(out, rawFolder + "onUnload.init", true);
-        break;
-    case SC_MAP_LOADED:
-        loadScriptFile(out, "onLoadMap.init", true);
-        loadScriptFile(out, rawFolder + "onLoadMap.init", true);
-        break;
-    case SC_MAP_UNLOADED:
-        loadScriptFile(out, "onUnloadMap.init", true);
-        loadScriptFile(out, rawFolder + "onUnloadMap.init", true);
-        break;
-    default:
-        break;
+    std::string rawFolder = "data/save/" + (df::global::world->cur_savegame.save_dir) + "/raw/";
+
+    auto i = table.find(event);
+    if ( i != table.end() ) {
+        const std::vector<std::string>& set = i->second;
+        loadScriptFiles(this, out, set, "."      );
+        loadScriptFiles(this, out, set, rawFolder);
+        loadScriptFiles(this, out, set, rawFolder + "objects/");
     }
 
     for (auto it = state_change_scripts.begin(); it != state_change_scripts.end(); ++it)
@@ -1662,6 +1993,70 @@ void Core::handleLoadAndUnloadScripts(color_ostream& out, state_change_event eve
 
 void Core::onStateChange(color_ostream &out, state_change_event event)
 {
+    using df::global::gametype;
+    static md5wrapper md5w;
+    static std::string ostype = "";
+
+    if (!ostype.size())
+    {
+        ostype = "unknown OS";
+        if (vinfo) {
+            switch (vinfo->getOS())
+            {
+            case OS_WINDOWS:
+                ostype = "Windows";
+                break;
+            case OS_APPLE:
+                ostype = "OS X";
+                break;
+            case OS_LINUX:
+                ostype = "Linux";
+                break;
+            default:
+                break;
+            }
+        }
+    }
+
+    switch (event)
+    {
+    case SC_WORLD_LOADED:
+    case SC_WORLD_UNLOADED:
+    case SC_MAP_LOADED:
+    case SC_MAP_UNLOADED:
+        if (world && world->cur_savegame.save_dir.size())
+        {
+            std::string save_dir = "data/save/" + world->cur_savegame.save_dir;
+            std::string evtlogpath = save_dir + "/events-dfhack.log";
+            std::ofstream evtlog;
+            evtlog.open(evtlogpath, std::ios_base::app);  // append
+            if (evtlog.fail())
+            {
+                if (DFHack::Filesystem::isdir(save_dir))
+                    out.printerr("Could not append to %s\n", evtlogpath.c_str());
+            }
+            else
+            {
+                char timebuf[30];
+                time_t rawtime = time(NULL);
+                struct tm * timeinfo = localtime(&rawtime);
+                strftime(timebuf, sizeof(timebuf), "[%Y-%m-%dT%H:%M:%S%z] ", timeinfo);
+                evtlog << timebuf;
+                evtlog << "DFHack " << Version::git_description() << " on " << ostype << "; ";
+                evtlog << "cwd md5: " << md5w.getHashFromString(getHackPath()).substr(0, 10) << "; ";
+                evtlog << "save: " << world->cur_savegame.save_dir << "; ";
+                evtlog << sc_event_name(event) << "; ";
+                if (gametype)
+                    evtlog << "game type " << ENUM_KEY_STR(game_type, *gametype) << " (" << *gametype << ")";
+                else
+                    evtlog << "game type unavailable";
+                evtlog << std::endl;
+            }
+        }
+    default:
+        break;
+    }
+
     EventManager::onStateChange(out, event);
 
     buildings_onStateChange(out, event);
@@ -1761,7 +2156,7 @@ int UnicodeAwareSym(const SDL::KeyboardEvent& ke)
     }
 
     // convert A-Z to their a-z counterparts:
-    if('A' < unicode && unicode < 'Z')
+    if('A' <= unicode && unicode <= 'Z')
     {
         unicode += 'a' - 'A';
     }
@@ -1807,7 +2202,7 @@ int Core::DFH_SDL_Event(SDL::Event* ev)
 
             // Use unicode so Windows gives the correct value for the
             // user's Input Language
-            if((ke->ksym.unicode & 0xff80) == 0)
+            if(ke->ksym.unicode && ((ke->ksym.unicode & 0xff80) == 0))
             {
                 int key = UnicodeAwareSym(*ke);
                 SelectHotkey(key, modstate);
@@ -1919,8 +2314,14 @@ static bool parseKeySpec(std::string keyspec, int *psym, int *pmod, std::string 
     if (keyspec.size() == 1 && keyspec[0] >= 'A' && keyspec[0] <= 'Z') {
         *psym = SDL::K_a + (keyspec[0]-'A');
         return true;
+    } else if (keyspec.size() == 1 && keyspec[0] >= '0' && keyspec[0] <= '9') {
+        *psym = SDL::K_0 + (keyspec[0]-'0');
+        return true;
     } else if (keyspec.size() == 2 && keyspec[0] == 'F' && keyspec[1] >= '1' && keyspec[1] <= '9') {
         *psym = SDL::K_F1 + (keyspec[1]-'1');
+        return true;
+    } else if (keyspec.size() == 3 && keyspec.substr(0, 2) == "F1" && keyspec[2] >= '0' && keyspec[2] <= '2') {
+        *psym = SDL::K_F10 + (keyspec[2]-'0');
         return true;
     } else if (keyspec == "Enter") {
         *psym = SDL::K_RETURN;
@@ -1949,6 +2350,23 @@ bool Core::ClearKeyBindings(std::string keyspec)
 
 bool Core::AddKeyBinding(std::string keyspec, std::string cmdline)
 {
+    size_t at_pos = keyspec.find('@');
+    if (at_pos != std::string::npos)
+    {
+        std::string raw_spec = keyspec.substr(0, at_pos);
+        std::string raw_focus = keyspec.substr(at_pos + 1);
+        if (raw_focus.find('|') != std::string::npos)
+        {
+            std::vector<std::string> focus_strings;
+            split_string(&focus_strings, raw_focus, "|");
+            for (size_t i = 0; i < focus_strings.size(); i++)
+            {
+                if (!AddKeyBinding(raw_spec + "@" + focus_strings[i], cmdline))
+                    return false;
+            }
+            return true;
+        }
+    }
     int sym;
     KeyBinding binding;
     if (!parseKeySpec(keyspec, &sym, &binding.modifiers, &binding.focus))
@@ -1978,13 +2396,16 @@ std::vector<std::string> Core::ListKeyBindings(std::string keyspec)
 {
     int sym, mod;
     std::vector<std::string> rv;
-    if (!parseKeySpec(keyspec, &sym, &mod))
+    std::string focus;
+    if (!parseKeySpec(keyspec, &sym, &mod, &focus))
         return rv;
 
     tthread::lock_guard<tthread::mutex> lock(*HotkeyMutex);
 
     std::vector<KeyBinding> &bindings = key_bindings[sym];
     for (int i = bindings.size()-1; i >= 0; --i) {
+        if (focus.size() && focus != bindings[i].focus)
+            continue;
         if (bindings[i].modifiers == mod)
         {
             std::string cmd = bindings[i].cmdline;
@@ -1997,11 +2418,12 @@ std::vector<std::string> Core::ListKeyBindings(std::string keyspec)
     return rv;
 }
 
-////////////////
-// ClassNamCheck
-////////////////
 
-// Since there is no Process.cpp, put ClassNamCheck stuff in Core.cpp
+/////////////////
+// ClassNameCheck
+/////////////////
+
+// Since there is no Process.cpp, put ClassNameCheck stuff in Core.cpp
 
 static std::set<std::string> known_class_names;
 static std::map<std::string, void*> known_vptrs;
